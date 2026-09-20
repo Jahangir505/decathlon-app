@@ -1,0 +1,27 @@
+{
+  "name": "@shopify-decathlon/worker",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@shopify-decathlon/shared": "workspace:*",
+    "@shopify-decathlon/database": "workspace:*",
+    "@shopify-decathlon/decathlon": "workspace:*",
+    "@shopify-decathlon/shopify": "workspace:*",
+    "@shopify-decathlon/sync": "workspace:*",
+    "@shopify-decathlon/logger": "workspace:*",
+    "bullmq": "^5.28.1",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@shopify-decathlon/sync",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@shopify-decathlon/shared": "workspace:*",
+    "@shopify-decathlon/database": "workspace:*",
+    "@shopify-decathlon/decathlon": "workspace:*",
+    "@shopify-decathlon/shopify": "workspace:*",
+    "@shopify-decathlon/logger": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "typescript": "^5.6.3"
+  }
+}

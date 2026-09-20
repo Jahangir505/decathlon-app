@@ -1,0 +1,394 @@
+// Phase 1 draft schema — see docs/database-design.md for rationale.
+// Entity names reflect the CONFIRMED direction: Shopify products are pushed TO Decathlon,
+// Decathlon marketplace orders are pulled INTO Shopify. See docs/api-mapping.md §0.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tenant root
+// ─────────────────────────────────────────────────────────────────────────
+
+model Shop {
+  id                  String    @id @default(cuid())
+  shopifyDomain       String    @unique
+  shopifyAccessToken  String    // encrypted at rest (application-layer AES-256-GCM)
+  shopifyScope        String?
+  installedAt         DateTime  @default(now())
+  uninstalledAt       DateTime?
+  isActive            Boolean   @default(true)
+  // Tracks whether the `custom.decathlon_category` metafield definition has been created on this
+  // shop yet, so it shows as a proper labeled field in Shopify admin's product editor instead of
+  // merchants needing to know the raw namespace/key to add it manually. Set once, lazily, on
+  // whichever request (OAuth callback or Token Exchange) happens first (see AuthService).
+  decathlonCategoryMetafieldDefinitionCreated Boolean @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  decathlonConnection   DecathlonConnection?
+  syncConfiguration     SyncConfiguration?
+  productMappings       ProductMapping[]
+  orderMappings         OrderMapping[]
+  returnMappings         ReturnMapping[]
+  syncJobs              SyncJob[]
+  syncLogs              SyncLog[]
+  webhookEvents          WebhookEvent[]
+  apiRequestLogs         ApiRequestLog[]
+  catalogReferences      DecathlonCatalogReference[]
+  categoryMappings       CategoryMapping[]
+  attributeValueMappings AttributeValueMapping[]
+
+  @@index([shopifyDomain])
+}
+
+/// Shopify product type -> Decathlon (H11) category, set once per product type instead of per
+/// product. A product's own `custom.decathlon_category` metafield still wins when present, so an
+/// exception doesn't require abandoning the rule.
+model CategoryMapping {
+  id                    String   @id @default(cuid())
+  shopId                String
+  shop                  Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  /// Stored lowercased; Shopify product types are free text and merchants are inconsistent about case.
+  shopifyProductType    String
+  decathlonCategoryCode String
+  /// Denormalized H11 label, so the UI and logs can name a category without re-fetching the tree.
+  decathlonCategoryLabel String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([shopId, shopifyProductType])
+  @@index([shopId])
+}
+
+/// Shopify option value -> Decathlon value-list code, for LIST attributes whose values Decathlon
+/// controls (e.g. `color`). Consulted before the name/label matching in the product import builder,
+/// so an explicit mapping always beats a guess.
+model AttributeValueMapping {
+  id             String   @id @default(cuid())
+  shopId         String
+  shop           Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  /// Decathlon attribute code, e.g. "color".
+  attributeCode  String
+  /// The VL11 list the value below belongs to — kept for display and for revalidation after a refresh.
+  valuesListCode String
+  /// Stored lowercased, matched case-insensitively against the variant's Shopify option value.
+  shopifyValue   String
+  decathlonCode  String
+  decathlonLabel String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([shopId, attributeCode, shopifyValue])
+  @@index([shopId, attributeCode])
+}
+
+enum DecathlonEnvironment {
+  PRODUCTION
+  PREPROD
+}
+
+enum ConnectionStatus {
+  NOT_CONFIGURED
+  CONNECTED
+  FAILED
+}
+
+model DecathlonConnection {
+  id               String               @id @default(cuid())
+  shopId           String               @unique
+  shop             Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  apiKeyEncrypted  String
+  environment      DecathlonEnvironment @default(PREPROD)
+  baseUrl          String
+  status           ConnectionStatus     @default(NOT_CONFIGURED)
+  lastTestedAt     DateTime?
+  lastTestResult   Json?                // masked summary only, never raw headers/key
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Product / Offer sync (Shopify → Decathlon)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum MappingStatus {
+  UNMAPPED
+  PENDING
+  SYNCED
+  FAILED
+  IGNORED
+}
+
+// One row per Shopify variant that is (or should be) listed on Decathlon.
+// shopSku is the identifier sent to Decathlon as shop_sku — matching priority
+// per docs' requirement: Decathlon product/offer id first, then SKU/EAN.
+model ProductMapping {
+  id                  String        @id @default(cuid())
+  shopId              String
+  shop                Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopifyProductId    String
+  shopifyVariantId    String
+  sku                 String
+  ean                 String?
+  shopSku             String        // value actually sent to Decathlon as shop_sku
+  decathlonProductId  String?
+  decathlonOfferId    String?
+  status              MappingStatus @default(UNMAPPED)
+  lastSyncedAt        DateTime?
+  lastError           String?
+  retryCount          Int           @default(0)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  orderLineItems      OrderLineItem[]
+
+  @@unique([shopId, shopifyVariantId])
+  @@index([shopId, sku])
+  @@index([shopId, decathlonProductId])
+  @@index([shopId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Order sync (Decathlon → Shopify import, Shopify → Decathlon fulfillment/refund)
+// ─────────────────────────────────────────────────────────────────────────
+
+model OrderMapping {
+  id                     String    @id @default(cuid())
+  shopId                 String
+  shop                   Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopifyOrderId         String
+  decathlonOrderId       String
+  decathlonOrderStatus   String    // raw Decathlon/Mirakl order_state_code
+  shopifyOrderStatus     String?
+  decathlonShipmentId    String?
+  shopifyFulfillmentId   String?
+  matchStatus            MappingStatus @default(PENDING) // whether all lines matched a ProductMapping
+  lastSyncedAt           DateTime?
+  lastError              String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  lineItems              OrderLineItem[]
+  returns                ReturnMapping[]
+
+  @@unique([shopId, decathlonOrderId])
+  @@unique([shopId, shopifyOrderId])
+  @@index([shopId, decathlonOrderStatus])
+}
+
+model OrderLineItem {
+  id                    String          @id @default(cuid())
+  orderMappingId        String
+  orderMapping          OrderMapping    @relation(fields: [orderMappingId], references: [id], onDelete: Cascade)
+  decathlonOrderLineId  String
+  shopifyLineItemId     String?
+  productMappingId      String?
+  productMapping        ProductMapping? @relation(fields: [productMappingId], references: [id])
+  sku                   String
+  quantity              Int
+  unitPrice             Decimal         @db.Decimal(12, 2)
+  currency              String
+  taxAmount             Decimal?        @db.Decimal(12, 2)
+  discountAmount        Decimal?        @db.Decimal(12, 2)
+  createdAt             DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+
+  @@index([orderMappingId])
+  @@index([productMappingId])
+}
+
+model ReturnMapping {
+  id                 String       @id @default(cuid())
+  shopId             String
+  shop               Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  orderMappingId     String
+  orderMapping       OrderMapping @relation(fields: [orderMappingId], references: [id], onDelete: Cascade)
+  decathlonReturnId  String
+  status             String       // raw Decathlon return status
+  trackingNumber     String?
+  rmaNumber          String?
+  labelUrl           String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@unique([shopId, decathlonReturnId])
+  @@index([orderMappingId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Background jobs & observability
+// ─────────────────────────────────────────────────────────────────────────
+
+enum SyncJobType {
+  PRODUCT_SYNC
+  OFFER_SYNC
+  ORDER_IMPORT
+  FULFILLMENT_SYNC
+  REFUND_SYNC
+  IMPORT_STATUS_POLL
+  RETRY_FAILED
+}
+
+enum SyncStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  RETRYING
+  SKIPPED
+  CANCELED
+}
+
+model SyncJob {
+  id               String      @id @default(cuid())
+  shopId           String
+  shop             Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  type             SyncJobType
+  status           SyncStatus  @default(PENDING)
+  bullJobId        String?
+  payload          Json?
+  progressCurrent  Int         @default(0)
+  progressTotal    Int?
+  retryCount       Int         @default(0)
+  lastError        String?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  logs             SyncLog[]
+
+  @@index([shopId, type, status])
+}
+
+model SyncLog {
+  id               String      @id @default(cuid())
+  shopId           String
+  shop             Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  syncJobId        String?
+  syncJob          SyncJob?    @relation(fields: [syncJobId], references: [id])
+  type             SyncJobType
+  status           SyncStatus
+  decathlonId      String?
+  shopifyId        String?
+  // Human-readable name of what this log row is about (product title + SKUs, order id...). Without
+  // it a PRODUCT_SYNC row renders with every id column empty, giving no way to tell which product
+  // it refers to.
+  itemLabel        String?
+  requestSummary   Json?       // secrets masked before write
+  responseSummary  Json?       // secrets masked before write
+  httpStatus       Int?
+  errorMessage     String?
+  retryCount       Int         @default(0)
+  durationMs       Int?
+  correlationId    String
+  createdAt        DateTime    @default(now())
+
+  @@index([shopId, type, status, createdAt])
+  @@index([correlationId])
+}
+
+enum WebhookSource {
+  SHOPIFY
+}
+
+model WebhookEvent {
+  id            String        @id @default(cuid())
+  shopId        String
+  shop          Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  source        WebhookSource @default(SHOPIFY)
+  topic         String
+  externalId    String?
+  payload       Json
+  processed     Boolean       @default(false)
+  processedAt   DateTime?
+  error         String?
+  receivedAt    DateTime      @default(now())
+
+  @@index([shopId, topic, processed])
+  @@index([externalId])
+}
+
+enum ApiTarget {
+  SHOPIFY
+  DECATHLON
+}
+
+model ApiRequestLog {
+  id                    String    @id @default(cuid())
+  shopId                String
+  shop                  Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  target                ApiTarget
+  method                String
+  url                   String
+  requestHeadersMasked  Json?
+  requestBodyMasked     Json?
+  responseStatus        Int?
+  responseBodyMasked    Json?
+  durationMs            Int?
+  correlationId         String
+  createdAt             DateTime  @default(now())
+
+  @@index([shopId, target, createdAt])
+  @@index([correlationId])
+}
+
+model SyncConfiguration {
+  id                          String   @id @default(cuid())
+  shopId                      String   @unique
+  shop                        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  autoProductSyncEnabled      Boolean  @default(false)
+  autoOfferSyncEnabled        Boolean  @default(false)
+  autoOrderImportEnabled      Boolean  @default(true)
+  orderImportIntervalMinutes  Int      @default(15)
+  priceMarkupPercent          Decimal? @db.Decimal(5, 2)
+  priceDiscountPercent        Decimal? @db.Decimal(5, 2)
+  defaultCurrency             String   @default("EUR")
+  // Seller-level (not per-product) — Decathlon's P41 import requires this on every product row per
+  // EU GPSR compliance (see docs/api-mapping.md §4): the manufacturer/seller contact email. There is
+  // no natural per-product Shopify source for it, so it's a one-time setting instead.
+  manufacturerEmail           String?
+  // Used only when a product's Shopify vendor doesn't match any Decathlon brand (exactly or via a
+  // loose substring match) — lets merchants unblock testing/real syncs with a known-valid brand
+  // name instead of every mismatched vendor hard-failing. A NAME (looked up the same way the vendor
+  // field is), not a raw Decathlon brand code — this app avoids exposing cryptic numeric codes.
+  fallbackBrandName           String?
+  // Decathlon's offer "state" (condition). Required on EVERY offer: omitting it fails the import
+  // with "The state of the product is unknown" (confirmed live 2026-09-20 — this was silently
+  // blocking every offer this app had ever pushed). "11" is New, and is what all 100 of this
+  // seller's live offers use. Configurable because a seller listing refurbished/used goods needs a
+  // different code, and OF61 (which would enumerate them) 404s on this instance.
+  offerStateCode              String   @default("11")
+  statusMapping               Json?    // configurable Decathlon status -> Shopify status
+  // OR11 pagination progress (docs/sync-strategy.md §5: re-derive from dateCreated cursor rather
+  // than raw offset where possible; offset is kept only as a fallback within one page).
+  orderImportCursorDate       DateTime?
+  orderImportCursorOffset     Int?     @default(0)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+}
+
+// Cache for H11 (hierarchies), PM11 (attributes), VL11 (value lists) — refresh hourly per docs.
+enum CatalogReferenceType {
+  HIERARCHY
+  ATTRIBUTE
+  VALUE_LIST
+}
+
+model DecathlonCatalogReference {
+  id         String               @id @default(cuid())
+  shopId     String
+  shop       Shop                 @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  type       CatalogReferenceType
+  key        String               // e.g. hierarchy code, attribute code
+  data       Json
+  fetchedAt  DateTime             @default(now())
+
+  @@unique([shopId, type, key])
+}

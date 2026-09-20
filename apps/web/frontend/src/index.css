@@ -1,0 +1,21 @@
+@import "tailwindcss";
+/* Automatic content detection can't reliably find its project root in this pnpm monorepo (multiple
+   package.json files, no .git directory) — declare the source explicitly instead of relying on it. */
+@source "./**/*.{ts,tsx}";
+
+@theme {
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #d9e6ff;
+  --color-brand-200: #b7d0ff;
+  --color-brand-300: #89b1ff;
+  --color-brand-400: #5a8bff;
+  --color-brand-500: #3466ff;
+  --color-brand-600: #1f47f0;
+  --color-brand-700: #1936c2;
+  --color-brand-800: #1a309a;
+  --color-brand-900: #1b2d78;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}

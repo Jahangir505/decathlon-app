@@ -1,0 +1,47 @@
+# Shopify CLI app configuration.
+# client_id is filled in by `shopify app config link` against your Partner Dashboard app —
+# do not hard-code real credentials here; this file is safe to commit.
+client_id = "dfbde3514120701190f0f5afe01543fc"
+name = "Decathlon Partner Sync"
+application_url = "https://dictate-resend-aerosol.ngrok-free.dev"
+embedded = true
+# Custom monorepo layout (not the default web/ folder) — points the CLI at our shopify.web.toml files.
+web_directories = ["apps/web/backend", "apps/web/frontend"]
+
+[access_scopes]
+scopes = "read_products,write_products,read_orders,write_orders,read_inventory,write_inventory,read_fulfillments,write_fulfillments"
+
+[auth]
+redirect_urls = [
+  "https://dictate-resend-aerosol.ngrok-free.dev/api/auth/callback"
+]
+
+[webhooks]
+api_version = "2025-01"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "/api/webhooks/app-uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = ["products/update"]
+  uri = "/api/webhooks/products-update"
+
+  [[webhooks.subscriptions]]
+  topics = ["inventory_levels/update"]
+  uri = "/api/webhooks/inventory-levels-update"
+
+  [[webhooks.subscriptions]]
+  topics = ["fulfillments/create"]
+  uri = "/api/webhooks/fulfillments-create"
+
+  [[webhooks.subscriptions]]
+  topics = ["fulfillments/update"]
+  uri = "/api/webhooks/fulfillments-update"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/cancelled"]
+  uri = "/api/webhooks/orders-cancelled"
+
+[build]
+automatically_update_urls_on_dev = true

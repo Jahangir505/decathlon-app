@@ -1,0 +1,4 @@
+roles = ["frontend"]
+
+[commands]
+dev = "pnpm dev"

@@ -1,0 +1,223 @@
+# Decathlon Partner (Mirakl Seller API) — API Mapping
+
+> Source of truth: this table is built from documentation pasted directly by the project owner
+> (Mirakl `developer.mirakl.com` OpenAPI3 reference pages, and Decathlon's own Zendesk
+> "Mirakl Import by API Integration Guide"). Where the two disagreed, **Decathlon's Zendesk guide
+> wins** (confirmed by project owner, 2026-09-13) — see the "Conflict" column.
+>
+> **No endpoint in this document was invented.** Anything not yet documented is marked
+> `UNCONFIRMED` or `NOT DOCUMENTED`, never guessed.
+
+## 0. Foundational facts
+
+| Item | Value | Confidence |
+|---|---|---|
+| API family | Mirakl Marketplace Platform (MMP) Seller REST API | Confirmed |
+| Relationship model | Shopify merchant is a **seller** on the Decathlon marketplace (not a reseller of a Decathlon catalogue) — see `decathlon-mirakl-seller-model` memory | Confirmed by project owner |
+| Production base URL (EU instance) | `https://marketplace-decathlon-eu.mirakl.net/` | Confirmed |
+| Preprod/sandbox base URL (EU instance) | `https://decathlonbelgium-preprod.mirakl.net/` | Confirmed |
+| Production base URL (Asia instance) | `https://marketplace-decathlon-as.mirakl.net/` | Confirmed (Decathlon Zendesk guide, 2026-09-14) — not used by this integration (EU/Decathlon Belgium is the target shop) |
+| Preprod base URL (Asia instance) | `https://decathlonhk2-dev.mirakl.net/` | Confirmed — not used by this integration |
+| Production base URL (Turkey instance) | `https://decathlontr-prod.mirakl.net/login` | Confirmed — not used by this integration |
+| Preprod base URL (Turkey instance) | `https://decathlontr-dev.mirakl.net/` | Confirmed — not used by this integration |
+| Auth mechanism | API key generated per-user under Mirakl **Personal Settings → API Key** tab | Confirmed |
+| Auth header format | `Authorization: <API_KEY>` (no `Bearer` prefix — a `Bearer` prefix returns 401) | **Confirmed** by live call against production (`marketplace-decathlon-eu.mirakl.net`), 2026-09-14. `H11` and `PM11` both returned 200 with the plain key. |
+| Webhooks | Not documented anywhere in the sources provided. Decathlon's guide describes fetching orders by polling `OR11` for `SHIPPING` status. | **NOT DOCUMENTED — assume polling only** until/unless the project owner provides webhook docs |
+| Order acceptance | Orders are **auto-accepted** by the marketplace because payment is captured before the order is created. `OR21` (accept/refuse) is therefore not part of this integration's flow. | Confirmed (Decathlon guide, Section 4) |
+| Cancellation model | ALL post-payment cancellations (cancellation, full/partial return, price adjustment) go through the **refund API (OR28)**, not the generic Mirakl cancel endpoints (OR29/OR30/OR33). | Confirmed (Decathlon guide, Section 5) |
+
+---
+
+## 1. Feature support matrix
+
+| Feature | Decathlon (Mirakl) API | Direction | Supported |
+|---|---|---|---|
+| Catalog taxonomy (categories) | `GET /api/hierarchies` (H11) | Decathlon → Shopify-app (reference data only) | Yes |
+| Product attribute schema | `GET /api/products/attributes` (PM11) | Decathlon → Shopify-app (reference data only) | Yes |
+| Attribute value lists | `GET /api/values_lists?code=...` (VL11) | Decathlon → Shopify-app (reference data only) | Yes — documented `/api/products/values` 404s (§4 item 11) |
+| Product creation/update | `POST /api/products/imports` (P41) | **Shopify → Decathlon** | Yes |
+| Product import status | `GET /api/products/imports/{import_id}` (P42) | n/a (polling own import) | Yes |
+| Product import error report | `GET /api/products/imports/{import_id}/error_report` (P44) | n/a | Yes — **underscored**; documented hyphen 404s |
+| Product import success report | `GET /api/products/imports/{import_id}/report` (P45) | n/a | **No — 404s on this instance**, no working variant found |
+| Get products by reference | `GET /api/products` (P31) | Decathlon → Shopify-app (verify own listings) | Yes |
+| Offer conditions list | `GET /api/offers/conditions` (OF61) | reference data | **No — 404s on this instance**; state code configured instead (default `11` New) |
+| Offer bulk import (price + stock) | `POST /api/offers/imports` (OF01) | **Shopify → Decathlon** | Yes |
+| Offer import status | `GET /api/offers/imports/{import_id}` (OF02) | n/a | Yes |
+| Offer import error report | `GET /api/offers/imports/{import_id}/error_report` (OF03) | n/a | Yes — **underscored**; documented hyphen 404s |
+| Offer create/update/delete (real-time, small batch) | `POST /api/offers` (OF24) | **Shopify → Decathlon** (used for fast stock/price updates) | Yes |
+| Order list (fetch marketplace orders) | `GET /api/orders` (OR11), filtered to `SHIPPING` status | **Decathlon → Shopify** | Yes |
+| Order accept/refuse | `PUT /api/orders/{order_id}/accept` (OR21) | n/a | **NOT USED** — orders are auto-accepted by the marketplace |
+| Confirm shipment | `POST /api/orders/{order_id}/shipments` (OR23, Decathlon variant) | **Shopify → Decathlon** | Yes |
+| Add tracking info to shipment | `PUT /api/orders/{order_id}/shipments/{shipment_id}` (OR24, Decathlon variant) | **Shopify → Decathlon** | Yes |
+| Refund order (all cancellation/return/price-adjustment cases) | `POST /api/orders/{order_id}/refunds` (OR28, Decathlon variant) | **Shopify → Decathlon** | Yes |
+| List accounting/document requests (invoices, credit notes) | `GET /api/document-request/requests` (DR11) | Decathlon → Shopify-app | Yes |
+| Upload accounting documents | `POST /api/document-request/documents/upload` (DR74) | **Shopify → Decathlon** | Yes |
+| Return: operator config | `GET /api/returns/operator_configuration` (RT30) | reference data | Yes |
+| Return: shop config | `GET /api/returns/shop_configuration` (RT31) | reference data | Yes |
+| Return: items eligible | `GET /api/returns/items_to_return` (RT12) | Decathlon → Shopify-app | Yes |
+| Return: create | `POST /api/returns` (RT01) | **Shopify → Decathlon** | Yes |
+| Return: list | `GET /api/returns` (RT11) | Decathlon → Shopify-app | Yes |
+| Return: update (tracking/RMA/label) | `PUT /api/returns` (RT04) | **Shopify → Decathlon** | Yes |
+| Return: cancel | `POST /api/returns/cancel` (RT29) | **Shopify → Decathlon** | Yes |
+| Order line shipping origin update | `PUT /api/orders/shipping_from` (OR07) | Shopify → Decathlon | **UNCONFIRMED** — present in generic Mirakl docs, not mentioned in Decathlon's guide; not part of MVP scope |
+| Async order export (bulk) | `POST /api/orders/async-export` + `OR14`/`OR15` | Decathlon → Shopify-app | **UNCONFIRMED for MVP** — generic Mirakl capability, useful later for high-volume order backfill; not called out by Decathlon guide |
+| Order patch update (arbitrary fields) | `PUT /api/orders` (OR04) | Shopify → Decathlon | **UNCONFIRMED** — present in generic docs, not in Decathlon guide; not part of MVP scope |
+| Order line adjustment | `PUT /api/orders/adjust` (OR32) | Shopify → Decathlon | **UNCONFIRMED** — not part of MVP scope |
+| Order documents (list/download/upload/delete) | `OR72`–`OR76` | Both | **UNCONFIRMED** — generic capability, not called out for Decathlon MVP; DR11/DR74 appear to be Decathlon's actual invoicing mechanism instead |
+| Order messages | `GET /api/orders/{order_id}/messages` (OR41) | n/a | **DEPRECATED** by Mirakl (removal April 2027) — do not build against it |
+| Order evaluation/rating | `GET /api/orders/{order_id}/evaluation` (OR51) | Decathlon → Shopify-app | **UNCONFIRMED** — not part of MVP scope |
+| Inventory push — real-time single SKU | `POST /api/offers` (OF24) | Shopify → Decathlon | Yes (see Offer bulk import above) |
+| Webhooks (any entity) | none documented | n/a | **NOT SUPPORTED / NOT DOCUMENTED** — polling only |
+
+---
+
+## 2. Full endpoint reference
+
+### 2.1 Catalog reference data (read-only, cached)
+
+| Endpoint | Method | Code | Rate limit (per docs) | Pagination | Internal method | Notes |
+|---|---|---|---|---|---|---|
+| `/api/hierarchies` | GET | H11 | 1/hour recommended & max | none documented | `DecathlonClient.getHierarchies()` | Cache aggressively; feeds Shopify collection/category mapping |
+| `/api/products/attributes` | GET | PM11 | 1/hour | none documented | `DecathlonClient.getAttributeConfig(hierarchyCode)` | Required to know which attributes are mandatory per category before building P41 payload |
+| `/api/products/values` | GET | VL11 | 1/hour | none documented | `DecathlonClient.getValueLists()` | Dropdown value validation (e.g. size/color enums) |
+
+### 2.2 Product creation (Shopify → Decathlon)
+
+| Endpoint | Method | Code | Rate limit | Pagination | Internal method | Notes |
+|---|---|---|---|---|---|---|
+| `/api/products/imports` | POST | P41 | Recommended hourly per seller, max every 15 min per seller | n/a (bulk file/batch) | `DecathlonClient.importProducts(payload)` | Async — returns `import_id` |
+| `/api/products/imports/{import_id}` | GET | P42 | Poll ~once/min until terminal status | n/a | `DecathlonClient.getProductImportStatus(importId)` | |
+| `/api/products/imports/{import_id}/error_report` | GET | P44 | On demand | n/a | `DecathlonClient.getProductImportErrorReport(importId)` | CSV; **integration**-stage errors. Path is underscored — the hyphenated `error-report` 404s always (see §4 item 10) |
+| `/api/products/imports/{import_id}/transformation_error_report` | GET | — | On demand | n/a | `DecathlonClient.getProductImportTransformationErrorReport(importId)` | CSV; **transformation**-stage errors *and warnings* |
+| `/api/products/imports/{import_id}/report` | GET | P45 | On demand | n/a | `DecathlonClient.getProductImportSuccessReport(importId)` | **404s on this instance** (bare "Not Found", i.e. wrong URL — no working variant found yet, §4 item 11) |
+| `/api/products` | GET | P31 | At each product page display | max 100 per call | `DecathlonClient.getProducts(refs)` | Used to verify current state of already-listed products, max 100 refs/call |
+
+### 2.3 Offers — price & stock (Shopify → Decathlon)
+
+| Endpoint | Method | Code | Rate limit | Pagination | Internal method | Notes |
+|---|---|---|---|---|---|---|
+| `/api/offers/conditions` | GET | OF61 | reference/cacheable | n/a | `DecathlonClient.getOfferConditions()` | **404s on this instance** — offer states are not enumerable; `offerStateCode` defaults to `11` (New) |
+| `/api/offers/imports` | POST | OF01 | bulk/batch usage | n/a (async) | `DecathlonClient.importOffers(payload)` | Preferred for initial/bulk price+stock sync |
+| `/api/offers/imports/{import_id}` | GET | OF02 | poll until terminal | n/a | `DecathlonClient.getOfferImportStatus(importId)` | |
+| `/api/offers/imports/{import_id}/error_report` | GET | OF03 | on demand | n/a | `DecathlonClient.getOfferImportErrorReport(importId)` | Path is **underscored**; the documented `error-report` 404s (§4 item 11). Columns end `error-line;error-message` |
+| `/api/offers` | POST | OF24 | real-time, small volume | n/a | `DecathlonClient.upsertOffers(offers[])` | Preferred for fast/incremental stock & price pushes after initial bulk import |
+
+### 2.4 Orders (Decathlon → Shopify import, Shopify → Decathlon fulfillment)
+
+| Endpoint | Method | Code | Rate limit | Pagination | Internal method | Notes |
+|---|---|---|---|---|---|---|
+| `/api/orders?order_state_codes=SHIPPING` | GET | OR11 | Async polling: 5–15 min recommended, max 1/min (default) or 15 min (external partner tier — TBD which applies) | offset pagination | `DecathlonClient.listOrdersAwaitingShipment()` | Only `SHIPPING` (awaiting shipment) per Decathlon guide — orders are pre-accepted |
+| `/api/orders/{order_id}/shipments` | POST | OR23 (Decathlon variant) | at each shipment confirmation | n/a | `DecathlonClient.confirmShipment(orderId, payload)` | Path differs from generic Mirakl docs — see conflict note in §0 |
+| `/api/orders/{order_id}/shipments/{shipment_id}` | PUT | OR24 (Decathlon variant) | at each tracking update | n/a | `DecathlonClient.addShipmentTracking(orderId, shipmentId, payload)` | |
+| `/api/orders/{order_id}/refunds` | POST | OR28 (Decathlon variant) | at each refund | n/a | `DecathlonClient.refundOrder(orderId, payload)` | Used for ALL post-payment cancellation/return/adjustment cases |
+| `/api/document-request/requests` | GET | DR11 | on demand | offset pagination (assumed, unconfirmed) | `DecathlonClient.listDocumentRequests()` | Invoice/credit-note requests tied to orders |
+| `/api/document-request/documents/upload` | POST | DR74 | at each document upload | n/a | `DecathlonClient.uploadAccountingDocument(payload)` | |
+
+### 2.5 Returns (Shopify ↔ Decathlon)
+
+| Endpoint | Method | Code | Rate limit | Pagination | Internal method | Notes |
+|---|---|---|---|---|---|---|
+| `/api/returns/operator_configuration` | GET | RT30 | reference/cacheable | n/a | `DecathlonClient.getOperatorReturnConfig()` | |
+| `/api/returns/shop_configuration` | GET | RT31 | reference/cacheable | n/a | `DecathlonClient.getShopReturnConfig()` | |
+| `/api/returns/items_to_return` | GET | RT12 | on demand | unconfirmed | `DecathlonClient.getItemsToReturn()` | |
+| `/api/returns` | POST | RT01 | at each return creation | n/a | `DecathlonClient.createReturn(payload)` | |
+| `/api/returns` | GET | RT11 | on demand | unconfirmed | `DecathlonClient.listReturns()` | |
+| `/api/returns` | PUT | RT04 | at each return update | n/a | `DecathlonClient.updateReturn(payload)` | tracking/RMA/label URL |
+| `/api/returns/cancel` | POST | RT29 | at each return cancellation | n/a | `DecathlonClient.cancelReturn(returnId)` | |
+
+### 2.6 Explicitly out of MVP scope (documented but not part of the Decathlon-confirmed flow)
+
+These exist in the generic Mirakl reference and may work, but are **not confirmed for Decathlon** and are **not required** by the integration journey Decathlon documented. Do not build against them until confirmed:
+
+- `OR04` order patch update, `OR07` shipping-origin update, `OR12` (deprecated, superseded by OR11), `OR21` accept/refuse (not needed — auto-accept), `OR26` (deprecated refund, superseded by OR28), `OR29/OR30/OR33` cancel endpoints (superseded by refund-only cancellation model), `OR31` custom fields, `OR32` line adjustment, `OR41` (deprecated messages), `OR51` evaluation, `OR72–OR76` order documents, `OR13/14/15` async order export.
+
+---
+
+## 3. Rate limiting & retry strategy
+
+- No explicit `X-RateLimit-*` header format was documented by either source — **UNCONFIRMED**. Build the client to *read and respect* standard rate-limit / `Retry-After` response headers defensively, but do not hard-code assumed limits into business logic beyond the per-endpoint call-frequency guidance in §2.
+- Apply exponential backoff (2s → 4s → 8s, capped, max ~5 attempts) on `429` and `502/503` per the project's general error-handling requirement.
+- Respect each endpoint's **maximum usage** figures listed in §2 as hard caps in the scheduler (e.g. never poll `OR11` more than once per minute).
+
+## 4. Open items requiring confirmation before Phase 3 sign-off
+
+1. ~~Exact authentication header name/format~~ — **CONFIRMED 2026-09-14**, see §0.
+2. Full JSON request/response schemas for P41, OF01/OF24, OR11, OR23/OR24, OR28, RT01/RT04 (only endpoint *shapes*, not field-level schemas, have been provided so far). H11 and PM11 response shapes are now confirmed live (200 OK, real category/attribute data, 2026-09-14) — schemas for the rest still need a live call, but those either mutate data or return real customer order PII, so they should be run against a **preprod** key/shop, not production (see item 6).
+3. Rate-limit header format actually returned by Decathlon's Mirakl instance — not yet observed (no `429` hit during testing; no `X-RateLimit-*`/`Retry-After` headers present on any 2026-09-14 response, success or error).
+4. Whether the "Default" vs "External Partner" call-frequency tiers in the generic Mirakl docs (for OR11) apply to this integration.
+5. **CONFIRMED 2026-09-14/15, both production AND preprod (identical results — not an environment issue)**:
+   - `OF61` (`/api/offers/conditions`) and `VL11` (`/api/products/values`) → **404 Not Found** with a valid, working key. The paths as documented (matching Decathlon's own Zendesk guide, not invented) may be wrong, version-prefixed, or not enabled for this shop/instance. Needs a check with the Decathlon onboarder/support.
+   - `RT30`/`RT31` (return **configuration**) → **403 Forbidden** — auth accepted, access denied.
+   - `RT12` (`/api/returns/items_to_return`) → **400 Bad Request** — path and auth are fine, but the request as sent is malformed, most likely missing a required query parameter (e.g. an `order_id` or date-range filter never documented by either source). Needs the exact required params from Decathlon/Mirakl docs before this can be fixed.
+   - `RT11` (list returns) and `DR11` (document requests) → **200 OK**, real shape confirmed (see §5 below). This is the interesting part: **returns as a feature is clearly active on this shop** (RT11 works), which rules out "returns not enabled" as the explanation for RT30/RT31's 403 — those two specifically are a return-*configuration* permission gap, not a returns-disabled gap. Worth asking Decathlon support specifically why config-level return endpoints are forbidden while return-listing endpoints work on the same key.
+6. ~~Write endpoints (P41, OF01, OF24...) and pulling real order data (OR11) have still not been tested~~ — **P41/OF01/OF24 tested live 2026-09-15**, see item 7. OR11 (real order data) and OR23/OR24/OR28/RT01/RT04/RT29 remain untested — still need a real/disposable order to exercise.
+7. **CONFIRMED live 2026-09-15, preprod, first write-endpoint tests this project has made**:
+   - `P41` (`POST /api/products/imports`) and `OF01` (`POST /api/offers/imports`) both reject a plain JSON body with **`415 Unsupported Media Type`**. Decathlon's Mirakl instance almost certainly expects a `multipart/form-data` file upload (the standard Mirakl bulk-import convention — a CSV/XML file field, not a raw JSON body) for these two endpoints. **This app's current `DecathlonHttpClient` only sends JSON and has no multipart support** — building that is required before P41/OF01 can work at all. Not yet attempted (needs a decision on CSV vs XML and the exact form field name, ideally from Decathlon's onboarder rather than guessing further).
+   - `OF24` (`POST /api/offers`) **does** accept JSON, but requires the body wrapped as `{ "offers": [...] }` — a bare array (the original guess, and what generic Mirakl docs suggest for some instances) gets `400 { "message": "Error with field offers. Please check the field datatype." }`. Fixed in `packages/decathlon/src/client.ts`'s `upsertOffers`.
+   - `OF24` is **NOT synchronous** despite `docs/api-mapping.md`'s original "real-time" description — a real call returned `{ "import_id": 299790 }` just like the async OF01/P41 pattern, pollable via `OF02` (`getOfferImportStatus`). `SyncEngine.syncOffers` now always polls regardless of which endpoint it used.
+   - `import_id` in both `ImportResult` and `ImportStatusResult` comes back as a **JSON number** (e.g. `299792`), not a string as originally typed — `packages/decathlon/src/schemas.ts` now coerces it via `z.union([z.string(), z.number()]).transform(String)`.
+   - `OF02` (`getOfferImportStatus`) real in-progress value is **`"RUNNING"`**, not `"PENDING"`. Real terminal response: `{"import_id":"299792","status":"COMPLETE","date_created":"...","has_error_report":true,"lines_in_error":1,"lines_in_pending":0,"lines_in_success":0,"lines_read":1,"mode":"NORMAL","offer_deleted":0,"offer_inserted":0,"offer_updated":0,"type":"MIRAKL"}`. **Critically: `status: "COMPLETE"` does NOT mean every line succeeded** — this response had `lines_in_error: 1, lines_in_success: 0` while `status` was `"COMPLETE"`. `SyncEngine.pollImportStatus` now checks `lines_in_error`/`lines_in_success` rather than trusting `status` alone.
+   - `OF03` (`getOfferImportErrorReport`) returned **404** immediately after the job reached `status: "COMPLETE"` with `has_error_report: true` — the report doesn't seem to be available the instant the job completes (eventual consistency). Handled as a soft/logged failure, not fatal, in `pollImportStatus`. Not yet confirmed how long the delay actually is.
+   - P41/OF01's multipart requirement means the disposable-test-product validation could not be completed end-to-end this round — that's the next thing to resolve (multipart upload support) before product sync can work at all, even though offer sync's core mechanics (OF24 submit → OF02 poll → line-level success/failure) are now confirmed against a real response.
+8. **CONFIRMED live 2026-09-18, preprod — multipart upload built and product-sync attribute mapping**:
+   - Multipart/form-data support added to `DecathlonHttpClient.requestMultipart` — CSV file, form field name **`file`**, sent as `text/csv`. Confirmed working: Decathlon accepts the upload (no more 415) and actually parses it as CSV.
+   - `PM11` (`GET /api/products/attributes`) **ignores `hierarchy_code` entirely** — always returns the full catalog-wide list (~38MB, 7339+ attributes across 541+ categories) regardless of the value passed. Confirmed by cross-referencing: a call with `hierarchy_code=10258` returned attributes for hundreds of *other* category codes too. Fetch once per shop (not per category) and filter client-side by each attribute's own `hierarchy_code` field (`""` = applies to every category).
+   - `VL11` — **the generic Mirakl path `/api/values_lists` works** (200), while Decathlon's own Zendesk-guide path `/api/products/values` still 404s — the opposite of this project's usual "Zendesk guide wins" rule, for this one endpoint specifically. **Unlike PM11, its `code` query param genuinely filters** — confirmed by comparing `?code=cpn_12` (7.5KB) vs `?code=size_cpn_12` (11.7KB) vs no code at all, which is **several gigabytes** (a bare unfiltered call overflowed Node's ~4GB single-Buffer limit outright). Always pass a specific list `code`; never call it unfiltered. Response key is `values_lists` (plural, underscore) — not `value_lists`.
+   - PM11 attribute shape: `{ code, hierarchy_code, label, type, required, variant, values_list, ... (plus large *_translations arrays not needed here) }`. `required: true` + `hierarchy_code: ""` = applies to every product regardless of category. For the live catalog snapshot taken this session, exactly **6 attributes are globally required**: `category` (the real category column — see item 9; the generic `category_code` column this app also used to send was never read at all), `ProductIdentifier` (→ shop SKU), `main_image` (→ first product image URL), `ean_codes` (→ variant barcode), `brandName` (type `LIST`, values-list code `brandName` — must resolve the Shopify vendor string to one of ~17,000 real Decathlon brand codes, e.g. `"DOMYOS"` → code `484`), and `GPSR_MANUFACTURER_EMAIL_ADDRESS` (EU GPSR compliance contact email — seller-wide, not per-product; no natural Shopify source, so it's now a `SyncConfiguration.manufacturerEmail` setting instead).
+   - Category-specific required attributes vary per category and are usually `LIST`-type (e.g. category `12`, "exercise bike", requires `PRODUCT_TYPE_12` and `SIZE_CPN_12`, each needing a value from that category's own value list) — often `variant: true`, meaning they're expected to vary per Shopify variant (e.g. size), which has no reliable generic Shopify-option mapping. `buildProductImportPayload` (packages/sync/src/adapters/decathlon.adapter.ts) auto-maps only the 6 global attributes above and throws a clear `ValidationError` naming exactly which category-specific attributes are still unmapped, rather than guessing.
+   - End-to-end confirmed live: a row built with all 6 global attributes plus manually-supplied category-specific values for category `12` was **accepted by P41 as a well-formed CSV row** (`import_id` returned) but still reported `transform_lines_in_error: 1` on the async transform step. `getProductImportErrorReport` 404'd repeatedly afterward (same eventual-consistency gap already documented for OF03 above) — see item 9 for how the real reason was finally found.
+9. **CONFIRMED live 2026-09-18, preprod — the real P41 transformation error, and two ruled-out theories**:
+   - **The error-report endpoint hierarchy for P42 (product import status) is not what OF02's shape implies.** `has_error_report` was `false` the whole time (hence `/api/products/imports/{id}/error-report` 404ing forever — that flag really did mean "no report at this URL", it wasn't an eventual-consistency delay after all for this case). The real signal is a *separate* flag, `has_transformation_error_report: true`, and its report lives at a *different, differently-styled* path: **`GET /api/products/imports/{id}/transformation_error_report`** (underscored, unlike every hyphenated path elsewhere in this API) returning `text/csv`. Tried and 404'd first: `transformation-error-report`, `transform-error-report`, `transformation-report`, `transformed-file` (all hyphenated guesses) — only the underscored one works. This is the single most useful endpoint discovered this session: it echoes back every column P41 actually parsed from the submitted file, with a per-line `errors` column giving the real Mirakl error code and message.
+   - **The real, current blocker for every product-sync attempt**: every single row, across three different real H11 categories (`12` "exercise bike", `128500` "T-shirts", and the category's own English label string), fails identically with **`1004|The category could not be identified`**. This is NOT a column-naming or CSV-formatting problem — both were tested and disproved directly against this report:
+     - *Ruled out: missing `category` column.* Added a `category` column (matching the PM11 attribute's own code, alongside the pre-existing `category_code`) with the identical value — same error, same line.
+     - *Ruled out: comma vs semicolon CSV delimiter.* Every CSV Decathlon has ever sent back (VL11, PM11, and this transformation report itself) uses semicolons, so this looked promising — but the report already showed every column and value correctly split out under the *original* comma-delimited submission (proving Decathlon's parser handled comma fine), and switching packages/decathlon/src/csv.ts to semicolon output produced the exact same error afterward too. Kept the semicolon delimiter anyway since it matches Decathlon's own convention and can't hurt, but it demonstrably wasn't the fix.
+     - *Ruled out: code vs. label.* Submitting the category as its English H11 label (`"exercise bike (fitness and athletic)"`) instead of the numeric code produced the identical `1004` error.
+   - *Also ruled out (2026-09-18, later same day): full ancestor-path notation.* Tried the H11 parent chain for category `12` (`114 → 187 → 12`) joined as `114|187|12`, `114/187/12`, `114>187>12`, and `114-187-12` in one batch — all four produced the exact same `1004|The category could not be identified`, on the same line, no difference at all from the bare leaf code. Rules out "needs the full path" as cleanly as the earlier theories.
+   - **RESOLVED 2026-09-18 (later the same day) — the real cause was a missing P41 form field, not the CSV content.** Mirakl's P41 takes a boolean multipart field **`operator_format`**. Without it (its default, `false`), Mirakl treats the upload as a *shop-format* file and runs its "transformation" step — mapping the seller's own columns onto operator attributes using a mapping the seller configures in the Mirakl portal. This account has no such mapping, so transformation could not identify anything — starting with the category — regardless of what was in the file, which is exactly why every content/format theory above failed identically. Sending `operator_format=true` tells Mirakl the columns already *are* its attribute codes: on the very next attempt `has_transformed_file` flipped to `true`, `import_status` advanced to a new `SENT` state, and the transformation report started returning real per-attribute validation instead of `1004`. `DecathlonClient.importProducts` now always sends it. Corollary, confirmed from the `transformed_file` endpoint (`GET .../imports/{id}/transformed_file`, 200 once transformation succeeds): only PM11 attribute codes survive — the generic Mirakl-style columns this app used to send (`category_code`, `label`, `description`, `brand`, `ean`, `images`) are silently dropped. `category` (the PM11 code) is the category column; `category_code` was never read at all.
+   - **What P41 actually validates once it can read the file** (all from the same live report):
+     - `1000|The attribute 'SPORT_ALL' (All sports) is required` — even though PM11 attaches `SPORT_ALL` to top-level sport-family nodes (`112`, `114`, … twelve of them), not to the leaf category. **Required attributes are inherited down the H11 tree**; `requiredAttributesForCategory` now takes the category's ancestor codes (from the new H11 cache via `ancestorCodesFor`). There is no generic Shopify source for "which sport", so it comes from a new per-product JSON metafield, `custom.decathlon_attributes` (attribute code → value, resolved by name/code against VL11). The same metafield covers every other category-specific LIST attribute — the "per-category attribute mapping" gap the README flagged — and variant-level lists are additionally matched against each variant's own Shopify option values.
+     - `2019|The attribute 'ean_codes' … must be a valid product reference: EAN-8 UPC EAN-13` — a real GTIN check-digit validation. Now checked client-side (`isValidGtin`) so a bad barcode fails fast with a clear message instead of an async round trip.
+     - `2021|… 'productTitle-en_GB' / 'productTitle-cs_CZ' / 'webcatchline-*' … must be filled in` (warnings, not errors) — per-locale TEXT attributes for the seller's sales channels (this account: GB + CZ), plus `mainTitle` and `longDescription-*`. Now filled from the Shopify title/description for every such locale attribute present in PM11 (English copy for non-English locales; overridable per code via the same metafield).
+     - Still unconfirmed: what the downstream import stage reports after `SENT` (the first import to reach it, 26733, was still `SENT` with no `error_report`/`new_product_report` minutes later). The first fully-valid row will show this. **→ Answered 2026-09-20, item 10 below.**
+
+10. **CONFIRMED live 2026-09-20, preprod — the downstream (integration) stage, its error report, and why every product sync silently sat at PROCESSING.** Four findings, from inspecting import `26737` (4 T-shirt rows) directly:
+    - **A product import has TWO stages, and `import_status: "COMPLETE"` only reports the first.** Stage 1 is transformation (`transform_lines_read/_in_error/_in_success/_with_warning`). Stage 2 is integration into Decathlon's catalog, reported in a separate **`integration_details`** object that appears *after* the status already reads COMPLETE: `{products_successfully_synchronized, rejected_products, invalid_products, products_with_wrong_identifiers, products_with_synchronization_issues, products_not_accepted_in_time, products_not_synchronized_in_time}`. Import 26737 was `transform_lines_in_error: 0, transform_lines_in_success: 4` — a clean transformation — while `integration_details` said `rejected_products: 4, products_successfully_synchronized: 0`. **Judging an import on the transform counts alone reports a total failure as a success**, which is exactly what this app did before. `products_successfully_synchronized > 0` is the only thing that means a product is really listed. Absence of `integration_details` means "not integrated yet", not "nothing to report" — so it is a reason to keep polling, not to resolve.
+    - **P44's real path is underscored: `GET /api/products/imports/{id}/error_report` (200).** Item 9 above concluded this report "isn't where P41's per-line errors live" because `has_error_report` was false on those imports *and* because the hyphenated `error-report` was the only URL ever tried — and that URL 404s unconditionally, which is indistinguishable from "no report". On 26737 `has_error_report` is `true` and the underscored path returns the integration-stage report: every submitted column plus an `errors` column reading **`MCM-04020|The product has been deleted.`** for all four rows. (`new_product_report` 404s with an explicit `"Resource not available : report on import id 26737"`, i.e. a real "not for this import" rather than a wrong URL.)
+    - **The reports carry a `warnings` column as well as `errors`, and a row can transform with zero errors but a warning that is the real reason it is refused one stage later.** All four rows warned: **`2021|The attribute 'productTitle-en_GB' (Product Title en-GB) does not comply with script validation because: DEBUG category=128500.`** A parser that only reads `errors` (as this app's did) drops this entirely, leaving a rejected import with no explanation anywhere.
+    - **That title warning is NOT caused by the title text.** Import `26741` submitted four deliberately different title styles under fresh SKUs — plain (`Test Cotton T-Shirt`), Decathlon-style (`Men's Short-Sleeved Cotton Fitness T-Shirt Black`), minimal (`Cotton T-Shirt`), and long — and **all four produced the identical `2021` warning**, whose message is a literal `DEBUG` string. This is Decathlon-side script validation for category `128500`, not something the app can satisfy by changing what it sends: **it needs a question to Decathlon's onboarder.** The same test did reveal one real, app-fixable rule: **`productTitle-*` is capped at 80 characters** (`2004|The 'productTitle-en_GB' … must have a maximum of 80 characters` on the 99-character title). `buildProductImportPayload` now trims `productTitle-*` at a word boundary; `mainTitle`/`webcatchline-*` took the same 99-character value with no such warning, so the cap appears specific to `productTitle-*`.
+    - **Timing**: integration is slow and its cadence is unknown. 26740 was still `SENT` across 11 consecutive minute-spaced checks, while day-old imports had all integrated. The poll backoff (`importPollDelayMs`) therefore spans ~19 hours rather than minutes.
+
+11. **CONFIRMED live 2026-09-20 — full sweep of the documented endpoint list, and the first successful write this integration has ever made.** Every read endpoint in the owner-supplied documentation table was called against preprod and compared with the path this app uses. **Four documented paths do not exist on this instance**, and two of them were silently breaking the integration:
+
+    | API | Documented path | Live result | Path that works |
+    |---|---|---|---|
+    | H11 | `/api/hierarchies` | 200 | as documented |
+    | PM11 | `/api/products/attributes` | 200 | as documented |
+    | VL11 | `/api/products/values` | **404** | `/api/values_lists?code=…` |
+    | P42 | `/api/products/imports/{id}` | 200 | as documented |
+    | P44 | `…/error-report` | **404** | `…/error_report` |
+    | P45 | `…/report` | **404** | none found yet |
+    | P31 | `/api/products?product_references=EAN\|…` | 200 | as documented |
+    | OF61 | `/api/offers/conditions` | **404** | none — states not enumerable |
+    | OF02 | `/api/offers/imports/{id}` | 200 | as documented |
+    | OF03 | `…/error-report` | **404** | `…/error_report` |
+
+    - **Hyphen vs underscore is systematic, not a P44 quirk.** OF03 has the identical problem, which means *every* offer-import failure this app ever reported had no detail attached — the same silent-failure mode as P44, and the real explanation for the "OF03 eventual-consistency delay" this doc previously recorded. The report was always there; the URL was wrong. Working rule for this instance: **report sub-resources are underscored** (`error_report`, `transformation_error_report`, `new_product_report`, `transformed_file`), everything else is hyphenated.
+    - **Telling a wrong URL from absent data**: a wrong path returns a bare `{"message":"Not Found"}`, whereas a real but empty report returns `{"message":"Resource not available : report on import id NNNNN"}`. P45's `/report` gives the *bare* form, so it is a wrong URL rather than "no successes yet"; no working variant has been found (`success_report`, `success-report`, `product_report` all 404).
+    - **Offers were never publishable: `state_code` is mandatory and this app never sent it.** OF03's now-readable report for imports 299790/299792 says **`The state of the product is unknown`** with the `state` column empty. Adding `state_code: "11"` turned a failing OF24 push into `lines_in_success: 1, offer_inserted: 1, status: COMPLETE` — the first successful write this integration has made. All 100 of this seller's live offers use `11` (New); the value is now `SyncConfiguration.offerStateCode` because OF61, which would enumerate the alternatives, 404s.
+    - **An offer attaches to a catalogue product by reference**, sent as `product_id` + `product_id_type: "EAN"`. Consequence worth noting: a variant whose EAN **already exists in Decathlon's catalogue can be made sellable through OF24 alone**, with no P41 product import at all — which is how the successful test above worked, and a way around the P41 title blocker for any product Decathlon already lists.
+    - **The offer error report has both `error-line` and `error-message`**, in that order. `parseReportText` matched on `"error"` and so reported the line *number* (`"2"`) as the failure reason; it now prefers an explicit message column.
+
+12. **CONFIRMED live 2026-09-20 — OF01 (bulk offer import) had never worked, for three independent reasons.** Found after the project owner supplied Decathlon's published value-list spreadsheet. OF24 (the JSON endpoint) and OF01 (the CSV endpoint) are **two different wire formats for the same data**, and this app was sending OF24's field names to both.
+    - **`import_mode` is a required multipart form field.** Without it OF01 returns `400 Param 'import_mode' is required` and imports nothing — so every bulk offer push failed before a single row was read. `NORMAL` is the value Decathlon's own completed imports report back (`"mode":"NORMAL"` on OF02).
+    - **The CSV columns are hyphenated and differently named.** OF01's own error report echoes the 26 columns it recognises: `sku;product-id;product-id-type;description;internal-description;price;price-ranges;price-additional-info;quantity;min-quantity-alert;state;available-start-date;available-end-date;update-delete;logistic-class;discount-price;discount-start-date;discount-end-date;discount-ranges;leadtime-to-ship;allow-quote-requests;product-tax-code;min-order-quantity;max-order-quantity;package-quantity;pricing-unit` (+ `error-line;error-message` in the report). Mapping from this app's OF24-shaped domain row: `shop_sku`→`sku`, `product_id`→`product-id`, `product_id_type`→`product-id-type`, `state_code`→`state`. **There is no currency column** — currency follows the sales channel, so `currency_iso_code` is OF24-only and is dropped for CSV. `DecathlonClient.importOffers` now translates via `toOfferCsvRow`.
+    - **`state` takes the numeric CODE, not the label.** Decathlon's published value list shows this attribute's values as labels (`New`, `Excellent`, `Very good`, `Good`, `Sufficient`, `REFURBISHED_GOOD`, `REFURBISHED_ACCEPTABLE`), but a single file submitting `11` and `New` as two rows **inserted the `11` row and rejected the `New` row** with "The state of the product is unknown". Use `11` (New) on both endpoints.
+    - Other value lists in that spreadsheet worth knowing when extending offer support: `product-id-type` = `SHOP_SKU|EAN|SKU`; `update-delete` = `UPDATE|DELETE`; `logistic-class` = size/weight bands; `pricing-unit` = `GRAM|KILOGRAM|…|PIECE` plus short forms; `active-channel` = `BE|DE|ES|FR|IT|NL|PT`; `free-return` = `true|false`. The product-side lists in the same sheet (`MANUFACTURING`/`WEAVING`/`DYEING`/`STITCHING`/`ASSEMBLY`/`FINISHING` = country names, `CHEMICAL*` = SVHC substance names, `RECYCLABILITY`/`BONUSES`/`PENALTIES` = packaging eco-attributes, `IS_*` = booleans) are the traceability/GPSR attributes, none of which category `128500` currently requires.
+
+## 5. Confirmed live response shapes (field names only, values redacted — 2026-09-15, preprod)
+
+- `DR11` (`GET /api/document-request/requests`) → `{ data: [{ currency_iso_code, date_created, document_details, due_date, entities, entity_date_created, entity_id, entity_type, id, initial_payment_state, issue_date, issuer, last_updated, recipient, state, taxes, total_amount_excluding_taxes, total_amount_including_taxes, total_tax_amount, type }], next_page_token }`
+- `RT11` (`GET /api/returns`) → `{ data: [{ date_created, documents, id, last_updated, method_code, order_commercial_id, order_id, reason_code, rejection_reason_code, return_address, return_lines, rma, state, tracking }], next_page_token, previous_page_token }`
+- `OF24` (`POST /api/offers`, body `{offers: [...]}`) → `{ "import_id": 299790 }` (import_id is a JSON number)
+- `OF02` (`GET /api/offers/imports/{id}`) terminal → `{ import_id, status: "COMPLETE", date_created, has_error_report, lines_read, lines_in_error, lines_in_pending, lines_in_success, mode, offer_deleted, offer_inserted, offer_updated, type }`
+- `P42` (`GET /api/products/imports/{id}`) terminal, 2026-09-20 → `{ import_id, import_status: "COMPLETE", date_created, shop_id, has_error_report, has_new_product_report, has_transformation_error_report, has_transformed_file, transform_lines_read, transform_lines_in_error, transform_lines_in_success, transform_lines_with_warning, integration_details: { invalid_products, products_not_accepted_in_time, products_not_synchronized_in_time, products_successfully_synchronized, products_with_synchronization_issues, products_with_wrong_identifiers, rejected_products }, update_options }` — note `import_status` (not `status`) and the `transform_`-prefixed counts; `SENT` is a real non-terminal value seen between submission and `COMPLETE`.
