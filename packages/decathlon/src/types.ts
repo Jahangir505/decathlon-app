@@ -135,36 +135,128 @@ export interface OfferImportRequest {
 }
 
 /**
- * UNCONFIRMED — OR11 order shape. No real order has ever been fetched (docs/api-mapping.md §4 item 6
- * — write endpoints untested, and no test order exists in preprod yet either). Modeled defensively:
- * only `id`/`order_state_code` are assumed present, everything else is optional/unknown so parsing
- * degrades gracefully rather than throwing on a real (differently-shaped) response.
+ * OR11 order — CONFIRMED live 2026-09-21 (preprod, 500+ real orders). Only the fields this app reads
+ * are typed. Note what is NOT here, because earlier code assumed it: there is no `id` (it is
+ * `order_id`), no `order_state_code` (it is `order_state`), no `date_created` (it is `created_date`),
+ * and no top-level addresses (they live under `customer.billing_address` / `customer.shipping_address`).
  */
 export interface DecathlonOrderDto {
-  id?: string;
+  order_id?: string;
   commercial_id?: string;
-  order_state_code?: string;
+  order_state?: string;
   currency_iso_code?: string;
-  date_created?: string;
-  customer?: unknown;
-  shipping_address?: unknown;
-  billing_address?: unknown;
-  order_lines?: unknown[];
+  created_date?: string;
+  last_updated_date?: string;
+  customer?: {
+    customer_id?: string;
+    firstname?: string;
+    lastname?: string;
+    billing_address?: unknown;
+    shipping_address?: unknown;
+    [key: string]: unknown;
+  };
+  customer_notification_email?: string;
+  order_lines?: DecathlonOrderLineDto[];
+  /** Order total incl. shipping. */
   total_price?: number;
   shipping_price?: number;
+  shipping_carrier_code?: string | null;
+  shipping_company?: string | null;
+  shipping_tracking?: string | null;
   [key: string]: unknown;
 }
 
-/**
- * UNCONFIRMED — OR11 list envelope. Modeled on DR11/RT11's CONFIRMED-live envelope shape
- * (`{ data: [...], next_page_token }`, see docs/api-mapping.md §5) since those are the only two
- * list endpoints actually exercised against a real Decathlon response so far — OR11 likely follows
- * the same Mirakl-instance convention, but this has NOT been confirmed.
- */
-export interface OrdersListResponse {
-  data?: DecathlonOrderDto[];
-  orders?: DecathlonOrderDto[]; // fallback key name, in case OR11 differs from DR11/RT11's envelope
-  total_count?: number;
-  next_page_token?: string;
+/** CONFIRMED live 2026-09-21. `price` is the LINE total excluding shipping (qty 10 x price_unit 2 =
+ *  price 20); `total_price` adds the line's shipping. */
+export interface DecathlonOrderLineDto {
+  order_line_id?: string;
+  order_line_state?: string;
+  offer_sku?: string;
+  product_title?: string;
+  quantity?: number;
+  price?: number;
+  price_unit?: number;
+  shipping_price?: number;
+  total_price?: number;
+  can_refund?: boolean;
+  refunds?: Array<{ id?: string; amount?: number; quantity?: number; shipping_amount?: number; state?: string; reason_code?: string }>;
   [key: string]: unknown;
+}
+
+export interface ShipmentTracking {
+  /** A code from SH21. When the carrier isn't in that list, send carrier_name (+ url) instead —
+   *  real orders on this instance carry free-text companies with a null code. */
+  carrier_code?: string;
+  carrier_name?: string;
+  carrier_url?: string;
+  tracking_number?: string;
+  tracking_url?: string;
+}
+
+/** ST01 shipment. */
+export interface ShipmentInput {
+  order_id: string;
+  shipped?: boolean;
+  shipment_lines: Array<{ order_line_id: string; quantity: number }>;
+  tracking?: ShipmentTracking;
+}
+
+export interface ShipmentBatchResult {
+  shipment_errors?: Array<{ order_id?: string; id?: string; message?: string }>;
+  shipment_success?: Array<{ id?: string; order_id?: string; [key: string]: unknown }>;
+}
+
+export interface DecathlonShipmentDto {
+  id: string;
+  order_id?: string;
+  status?: string;
+  shipment_lines?: Array<{ order_line_id?: string; offer_sku?: string; quantity?: number }>;
+  tracking?: ShipmentTracking;
+  [key: string]: unknown;
+}
+
+export interface DecathlonCarrier {
+  code: string;
+  label: string;
+  tracking_url?: string;
+  standard_code?: string;
+}
+
+/** OR28 refund line. `amount` is tax-included and excludes shipping, which goes in shipping_amount. */
+export interface RefundInput {
+  order_line_id: string;
+  quantity: number;
+  amount: number;
+  shipping_amount?: number;
+  currency_iso_code: string;
+  reason_code: string;
+}
+
+/** OR28 response — CONFIRMED live 2026-09-21 (refund 6480). Each entry echoes the request plus
+ *  `refund_id` (the same id that then appears as `refunds[].id` on the OR11 line) and
+ *  `order_refund_id`. The refund starts in state WAITING_REFUND_PAYMENT on the line. */
+export interface RefundBatchResult {
+  order_tax_mode?: string;
+  refunds?: Array<{ refund_id?: string; id?: string; order_refund_id?: string; order_line_id?: string; amount?: number; [key: string]: unknown }>;
+  [key: string]: unknown;
+}
+
+/** RT11 return — CONFIRMED live 2026-09-15/21. */
+export interface DecathlonReturnDto {
+  id: string;
+  order_id?: string;
+  order_commercial_id?: string;
+  state?: string;
+  reason_code?: string;
+  rma?: string | null;
+  date_created?: string;
+  last_updated?: string;
+  return_lines?: Array<{ order_line_id?: string; quantity?: number; reason_code?: string }>;
+  tracking?: ShipmentTracking & { carrier_standard_code?: string | null };
+  [key: string]: unknown;
+}
+
+export interface ReturnBatchResult {
+  return_errors?: Array<{ id?: string; message?: string }>;
+  return_success?: Array<{ id?: string; [key: string]: unknown }>;
 }

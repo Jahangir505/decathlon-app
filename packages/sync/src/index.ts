@@ -1,5 +1,6 @@
 export * from "./queues";
 export * from "./engine";
+export * from "./order-lifecycle";
 export * from "./catalog-cache";
 export * from "./batching";
 export * from "./pricing";

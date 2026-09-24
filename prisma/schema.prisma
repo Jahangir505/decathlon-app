@@ -36,6 +36,8 @@ model Shop {
   productMappings       ProductMapping[]
   orderMappings         OrderMapping[]
   returnMappings         ReturnMapping[]
+  shipmentMappings       ShipmentMapping[]
+  refundMappings         RefundMapping[]
   syncJobs              SyncJob[]
   syncLogs              SyncLog[]
   webhookEvents          WebhookEvent[]
@@ -43,6 +45,7 @@ model Shop {
   catalogReferences      DecathlonCatalogReference[]
   categoryMappings       CategoryMapping[]
   attributeValueMappings AttributeValueMapping[]
+  selectedProducts       SelectedProduct[]
 
   @@index([shopifyDomain])
 }
@@ -59,6 +62,15 @@ model CategoryMapping {
   decathlonCategoryCode String
   /// Denormalized H11 label, so the UI and logs can name a category without re-fetching the tree.
   decathlonCategoryLabel String?
+  /// Decathlon `Gender_apparel` code for every product of this type (1 ADULT, 2 MEN'S, 3 WOMEN'S,
+  /// 4 KIDS, ...). Required for all apparel and footwear since Decathlon's 2026-09-21 change. A
+  /// product's own "Decathlon Attributes" metafield still wins.
+  gender                 String?
+  genderLabel            String?
+  /// Decathlon size chart prefix (e.g. "Z349" SIZE MEN TOP, "Z272" MEN'S SHOE SIZES). Each Shopify
+  /// size of this type is matched to the chart's code automatically; explicit size mappings win.
+  sizeChart              String?
+  sizeChartLabel         String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -143,6 +155,10 @@ model ProductMapping {
   lastSyncedAt        DateTime?
   lastError           String?
   retryCount          Int           @default(0)
+  // sha256 of the exact P41 row last submitted for this variant. Automatic (webhook) syncs skip a
+  // variant whose row is unchanged: Shopify fires products/update for edits Decathlon never sees
+  // (image processing, tags, stock), and P41 allows roughly one import per 15 minutes per shop.
+  lastPayloadHash     String?
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
@@ -163,8 +179,13 @@ model OrderMapping {
   shopId                 String
   shop                   Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
   shopifyOrderId         String
+  // OR11's `order_id` (e.g. `GB5TWXPAN26F-A`) — the id every order-scoped Decathlon call takes.
+  // Rows imported before 2026-09-21 hold the COMMERCIAL id here instead (the normalizer read a
+  // non-existent `id` field and fell back to `commercial_id`); importOneOrder repairs them on sight.
   decathlonOrderId       String
-  decathlonOrderStatus   String    // raw Decathlon/Mirakl order_state_code
+  // OR11's `commercial_id` (e.g. `GB5TWXPAN26F`) — what the customer sees, and what RT11/RT12 filter by.
+  decathlonCommercialId  String?
+  decathlonOrderStatus   String    // raw Decathlon/Mirakl `order_state`
   shopifyOrderStatus     String?
   decathlonShipmentId    String?
   shopifyFulfillmentId   String?
@@ -176,6 +197,8 @@ model OrderMapping {
 
   lineItems              OrderLineItem[]
   returns                ReturnMapping[]
+  shipments              ShipmentMapping[]
+  refunds                RefundMapping[]
 
   @@unique([shopId, decathlonOrderId])
   @@unique([shopId, shopifyOrderId])
@@ -214,10 +237,59 @@ model ReturnMapping {
   trackingNumber     String?
   rmaNumber          String?
   labelUrl           String?
+  reasonCode         String?
+  carrierCode        String?
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
   @@unique([shopId, decathlonReturnId])
+  @@index([orderMappingId])
+}
+
+/// One Shopify fulfillment -> one Decathlon shipment (ST01). Keyed on the Shopify fulfillment so a
+/// redelivered `fulfillments/create` webhook can never ship the same lines twice, and so a later
+/// `fulfillments/update` (tracking added/changed) knows which Decathlon shipment to update (ST23).
+model ShipmentMapping {
+  id                   String       @id @default(cuid())
+  shopId               String
+  shop                 Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  orderMappingId       String
+  orderMapping         OrderMapping @relation(fields: [orderMappingId], references: [id], onDelete: Cascade)
+  shopifyFulfillmentId String
+  decathlonShipmentId  String?
+  carrierCode          String?
+  carrierName          String?
+  trackingNumber       String?
+  trackingUrl          String?
+  status               SyncStatus   @default(PENDING)
+  lastError            String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  @@unique([shopId, shopifyFulfillmentId])
+  @@index([orderMappingId])
+}
+
+/// One Shopify refund (or one Shopify cancellation) -> one OR28 call. Decathlon collects the
+/// customer's payment, so a refund issued only in Shopify never reaches the customer — this row is
+/// what guarantees each one is pushed exactly once. `shopifyRefundId` is `cancel:<orderId>` for the
+/// refund-everything-remaining pass triggered by an order cancellation.
+model RefundMapping {
+  id                 String       @id @default(cuid())
+  shopId             String
+  shop               Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  orderMappingId     String
+  orderMapping       OrderMapping @relation(fields: [orderMappingId], references: [id], onDelete: Cascade)
+  shopifyRefundId    String
+  decathlonRefundIds Json?
+  amount             Decimal?     @db.Decimal(12, 2)
+  currency           String?
+  status             SyncStatus   @default(PENDING)
+  lastError          String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@unique([shopId, shopifyRefundId])
   @@index([orderMappingId])
 }
 
@@ -231,6 +303,7 @@ enum SyncJobType {
   ORDER_IMPORT
   FULFILLMENT_SYNC
   REFUND_SYNC
+  RETURN_SYNC
   IMPORT_STATUS_POLL
   RETRY_FAILED
 }
@@ -344,6 +417,9 @@ model SyncConfiguration {
   shopId                      String   @unique
   shop                        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
   autoProductSyncEnabled      Boolean  @default(false)
+  // Which products are sent to Decathlon at all. ALL = every active product (with a category);
+  // SELECTED = only those in SelectedProduct, for merchants who list part of their catalogue.
+  productSyncScope            ProductSyncScope @default(ALL)
   autoOfferSyncEnabled        Boolean  @default(false)
   autoOrderImportEnabled      Boolean  @default(true)
   orderImportIntervalMinutes  Int      @default(15)
@@ -365,13 +441,43 @@ model SyncConfiguration {
   // seller's live offers use. Configurable because a seller listing refurbished/used goods needs a
   // different code, and OF61 (which would enumerate them) 404s on this instance.
   offerStateCode              String   @default("11")
+  // OR28 reason code (RE01 `GET /api/reasons/REFUND`: 15 Out of stock, 16 Cancelled by the client
+  // prior to shipping, 17 Item returned, 18 Item not received, 19 Agreement found with the vendor).
+  // Null = choose per line: 15 while the line is still unshipped, 17 once it has shipped. Shopify
+  // refunds carry no reason Decathlon understands, so a fixed override is the only other option.
+  refundReasonCode            String?
+  // Which Shopify product option holds each variant's colour / size. Null = the usual names
+  // ("Color"/"Colour", "Size"). Colour is read ONLY from this option: matching every option value
+  // against Decathlon's colour list let a size like "M" fuzzy-match a colour such as "MAUVE".
+  colorOptionName             String?
+  sizeOptionName              String?
   statusMapping               Json?    // configurable Decathlon status -> Shopify status
   // OR11 pagination progress (docs/sync-strategy.md §5: re-derive from dateCreated cursor rather
   // than raw offset where possible; offset is kept only as a fallback within one page).
   orderImportCursorDate       DateTime?
   orderImportCursorOffset     Int?     @default(0)
+  // Set when the merchant finishes the in-app setup wizard. Null sends them to /setup on open.
+  setupCompletedAt            DateTime?
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt
+}
+
+enum ProductSyncScope {
+  ALL
+  SELECTED
+}
+
+/// Products the merchant picked for Decathlon while SyncConfiguration.productSyncScope is SELECTED.
+/// Removing a row stops future syncs only — whatever was already listed on Decathlon stays there.
+model SelectedProduct {
+  id               String   @id @default(cuid())
+  shopId           String
+  shop             Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopifyProductId String   // gid://shopify/Product/...
+  title            String   // copied at pick time so the list renders without a Shopify call
+  createdAt        DateTime @default(now())
+
+  @@unique([shopId, shopifyProductId])
 }
 
 // Cache for H11 (hierarchies), PM11 (attributes), VL11 (value lists) — refresh hourly per docs.

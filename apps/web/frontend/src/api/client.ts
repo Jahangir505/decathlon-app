@@ -2,6 +2,13 @@ declare global {
   interface Window {
     shopify?: {
       idToken: () => Promise<string>;
+      /** App Bridge's product picker; resolves undefined when the merchant cancels. */
+      resourcePicker: (options: {
+        type: "product";
+        multiple?: boolean | number;
+        action?: "add" | "select";
+        filter?: { variants?: boolean; draft?: boolean; archived?: boolean };
+      }) => Promise<Array<{ id: string; title: string }> | undefined>;
     };
   }
 }

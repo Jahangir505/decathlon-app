@@ -2,8 +2,8 @@
  * Order creation — the Shopify-side write for order import (Decathlon -> Shopify). Decathlon
  * captures payment before this app ever sees the order (docs/api-mapping.md §0: "Order acceptance"),
  * so every imported order is created as already financially PAID; no checkout/payment flow runs
- * through Shopify. Fulfillment is intentionally NOT set here — fulfillment/refund push-back to
- * Decathlon is a separate, deferred pass (see the plan's "Fulfillment/refund push-back" note).
+ * through Shopify. Fulfillment is intentionally NOT set here: the merchant fulfills in Shopify as
+ * usual, and the `fulfillments/create` webhook pushes that back to Decathlon (SyncEngine.syncFulfillment).
  */
 
 export const ORDER_CREATE_MUTATION = /* GraphQL */ `
@@ -43,9 +43,21 @@ export interface OrderCreateLineItemPriceSet {
   presentmentMoney: { amount: string; currencyCode: string };
 }
 
+/** Line item properties surface as `properties` on the line in every order/fulfillment/refund
+ *  webhook — which is how a fulfillment is mapped back to the exact Decathlon order line it ships.
+ *  `properties` on OrderCreateLineItemInput confirmed via schema introspection (API 2025-01). */
+export interface OrderCreateLineItemProperty {
+  name: string;
+  value: string;
+}
+
+/** Leading underscore keeps it out of customer-facing views (Shopify's convention for private
+ *  line properties). */
+export const DECATHLON_ORDER_LINE_PROPERTY = "_decathlon_order_line_id";
+
 export type OrderCreateLineItemInput =
-  | { variantId: string; quantity: number; priceSet: OrderCreateLineItemPriceSet }
-  | { title: string; quantity: number; priceSet: OrderCreateLineItemPriceSet };
+  | { variantId: string; quantity: number; priceSet: OrderCreateLineItemPriceSet; properties?: OrderCreateLineItemProperty[] }
+  | { title: string; sku?: string; quantity: number; priceSet: OrderCreateLineItemPriceSet; properties?: OrderCreateLineItemProperty[] };
 
 export interface OrderCreateOrderInput {
   email?: string;
@@ -68,4 +80,19 @@ export interface OrderCreateResponse {
     order: { id: string; name: string } | null;
     userErrors: Array<{ field: string[] | null; message: string }>;
   };
+}
+
+export const TAGS_ADD_MUTATION = /* GraphQL */ `
+  mutation TagsAdd($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export interface TagsAddResponse {
+  tagsAdd: { userErrors: Array<{ field: string[] | null; message: string }> };
 }

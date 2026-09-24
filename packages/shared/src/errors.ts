@@ -41,6 +41,18 @@ export class DecathlonRateLimitError extends DecathlonApiError {
   }
 }
 
+/**
+ * A non-idempotent Decathlon write (refund, shipment) whose request may or may not have been applied
+ * — a timeout, dropped connection or 5xx after the body was sent. It must NOT be retried blindly:
+ * Mirakl has no idempotency key, so a resend could refund a customer twice. Callers check the
+ * current state on Decathlon before trying again.
+ */
+export class DecathlonOutcomeUnknownError extends DecathlonApiError {
+  constructor(endpoint: string, cause?: unknown) {
+    super(`Decathlon did not confirm ${endpoint}; it may or may not have been applied`, endpoint, undefined, cause);
+  }
+}
+
 /** Thrown by packages/shopify when an Admin API call fails. */
 export class ShopifyApiError extends AppError {
   constructor(

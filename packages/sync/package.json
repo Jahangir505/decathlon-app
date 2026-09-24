@@ -6,17 +6,19 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch"
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@shopify-decathlon/shared": "workspace:*",
     "@shopify-decathlon/database": "workspace:*",
     "@shopify-decathlon/decathlon": "workspace:*",
-    "@shopify-decathlon/shopify": "workspace:*",
-    "@shopify-decathlon/logger": "workspace:*"
+    "@shopify-decathlon/logger": "workspace:*",
+    "@shopify-decathlon/shared": "workspace:*",
+    "@shopify-decathlon/shopify": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.9"
   }
 }

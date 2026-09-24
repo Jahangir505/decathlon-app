@@ -52,6 +52,8 @@ export interface NormalizedProduct {
   externalId?: string; // decathlonProductId once listed
   shopSku: string;
   title: string;
+  /** Shopify product status — ACTIVE, DRAFT or ARCHIVED. Only ACTIVE is sent to Decathlon. */
+  status?: string;
   description?: string;
   brand?: string;
   categoryCode?: string; // Decathlon hierarchy (H11) code — resolved from productType if not set per-product
@@ -66,6 +68,7 @@ export interface NormalizedProduct {
 export interface NormalizedOrderItem {
   decathlonOrderLineId: string;
   sku: string;
+  title?: string;
   quantity: number;
   unitPrice: number;
   currency: string;
@@ -74,7 +77,8 @@ export interface NormalizedOrderItem {
 }
 
 export interface NormalizedOrder {
-  externalId: string; // decathlonOrderId
+  externalId: string; // decathlonOrderId — OR11 `order_id`
+  commercialId?: string; // OR11 `commercial_id` — customer-facing, and what RT11/RT12 filter by
   status: string; // raw Decathlon order_state_code
   currency: string;
   createdAt: string;

@@ -28,6 +28,19 @@ export class ShopRepository {
     });
   }
 
+  /**
+   * GDPR `shop/redact` (sent 48h after uninstall): deletes the shop and — via onDelete: Cascade on
+   * every relation (verified 2026-09-21) — all of its data. Skipped for a shop that is active again:
+   * a merchant who reinstalled must not lose their live data to a late redact request.
+   */
+  async eraseIfUninstalled(shopifyDomain: string): Promise<"erased" | "active" | "unknown"> {
+    const shop = await this.prisma.shop.findUnique({ where: { shopifyDomain } });
+    if (!shop) return "unknown";
+    if (shop.isActive) return "active";
+    await this.prisma.shop.delete({ where: { id: shop.id } });
+    return "erased";
+  }
+
   markUninstalled(shopifyDomain: string): Promise<Shop> {
     return this.prisma.shop.update({
       where: { shopifyDomain },

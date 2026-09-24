@@ -37,6 +37,18 @@ export class CategoryMappingRepository {
   async remove(shopId: string, shopifyProductType: string): Promise<void> {
     await this.prisma.categoryMapping.deleteMany({ where: { shopId, shopifyProductType: normalizeKey(shopifyProductType) } });
   }
+
+  /** Gender / size chart for a product type. The type needs a category rule first. `null` clears. */
+  updateDetails(
+    shopId: string,
+    shopifyProductType: string,
+    data: { gender?: string | null; genderLabel?: string | null; sizeChart?: string | null; sizeChartLabel?: string | null },
+  ): Promise<CategoryMapping> {
+    return this.prisma.categoryMapping.update({
+      where: { shopId_shopifyProductType: { shopId, shopifyProductType: normalizeKey(shopifyProductType) } },
+      data,
+    });
+  }
 }
 
 export class AttributeValueMappingRepository {

@@ -8,6 +8,7 @@ export const QUEUE_NAMES = {
   ORDER_IMPORT: "order-import",
   FULFILLMENT_SYNC: "fulfillment-sync",
   REFUND_SYNC: "refund-sync",
+  RETURN_SYNC: "return-sync",
   IMPORT_STATUS_POLL: "import-status-poll",
   RETRY_FAILED_SYNC: "retry-failed-sync",
 } as const;
@@ -18,6 +19,12 @@ export interface ProductSyncJobPayload {
   shopId: string;
   shopifyProductId: string;
   shopifyVariantIds?: string[]; // omit to sync all variants of the product
+  /**
+   * "webhook" syncs skip variants whose Decathlon row is unchanged since the last import (see
+   * ProductMapping.lastPayloadHash). Anything else — "Sync products now", a retry — always sends,
+   * so a merchant can force a resubmission after Decathlon fixes something on their side.
+   */
+  trigger?: "webhook" | "manual";
   correlationId?: string;
   syncJobId?: string;
 }
@@ -35,15 +42,55 @@ export interface OrderImportJobPayload {
   syncJobId?: string;
 }
 
+/**
+ * A Shopify line as it appears in a fulfillment/refund webhook — just what's needed to find the
+ * Decathlon order line it corresponds to (see order-lifecycle.ts's resolveLines).
+ */
+export interface ShopifyLineRef {
+  /** From the `_decathlon_order_line_id` line property this app sets on every imported order. */
+  decathlonOrderLineId?: string;
+  variantId?: string;
+  sku?: string;
+  quantity: number;
+}
+
 export interface FulfillmentSyncJobPayload {
   shopId: string;
   shopifyOrderId: string;
   shopifyFulfillmentId: string;
+  /** Shopify fulfillment status — only "success" is pushed to Decathlon. */
+  status: string;
+  trackingCompany?: string;
+  trackingNumber?: string;
+  trackingUrl?: string;
+  lines: ShopifyLineRef[];
+  correlationId?: string;
+  syncJobId?: string;
 }
 
 export interface RefundSyncJobPayload {
   shopId: string;
   shopifyOrderId: string;
+  /**
+   * "refund" pushes one Shopify refund. "cancel" (from orders/cancelled) refunds whatever is still
+   * refundable on lines Decathlon hasn't shipped yet — the customer paid Decathlon, so a cancellation
+   * that isn't refunded through OR28 leaves them charged for an order that will never ship.
+   */
+  mode: "refund" | "cancel";
+  shopifyRefundId?: string;
+  /** Tax-inclusive amount per line, in the order's (presentment) currency. */
+  lines?: Array<ShopifyLineRef & { amount: number }>;
+  shippingAmount?: number;
+  /** Refund total with no line attached (Shopify "refund amount" without items — a price gesture). */
+  unallocatedAmount?: number;
+  correlationId?: string;
+  syncJobId?: string;
+}
+
+export interface ReturnSyncJobPayload {
+  shopId: string;
+  correlationId?: string;
+  syncJobId?: string;
 }
 
 export interface ImportStatusPollJobPayload {

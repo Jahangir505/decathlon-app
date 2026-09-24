@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Repositories, SyncConfiguration, SyncJobType } from "@shopify-decathlon/database";
-import type { DecathlonAttribute, DecathlonClient } from "@shopify-decathlon/decathlon";
+import type { DecathlonAttribute, DecathlonClient, ProductImportRequest } from "@shopify-decathlon/decathlon";
 import { ancestorCodesFor, requiredAttributesForCategory } from "@shopify-decathlon/decathlon";
 import type { ShopifyAdminGraphqlClient } from "@shopify-decathlon/shopify";
 import {
@@ -24,7 +24,9 @@ import type {
   OrderImportJobPayload,
   ProductSyncJobPayload,
   RefundSyncJobPayload,
+  ReturnSyncJobPayload,
 } from "./queues";
+import { OrderLifecycleSync } from "./order-lifecycle";
 import { MAX_IMPORT_POLL_ATTEMPTS } from "./queues";
 import { CatalogCache } from "./catalog-cache";
 import { matchOrderLine, matchProductMapping } from "./matching";
@@ -35,6 +37,10 @@ import {
   extractOrdersArray,
   normalizeDecathlonOrder,
   parseReportText,
+  optionRoleNames,
+  BRAND_ATTRIBUTE_CODE,
+  SIZE_ATTRIBUTE_CODE,
+  SIZE_VALUE_LISTS,
   type ParsedReportRow,
 } from "./adapters/decathlon.adapter";
 
@@ -57,6 +63,72 @@ export interface ImportSubmission {
   itemLabel: string;
 }
 
+/**
+ * An automatic sync found nothing Decathlon would see as changed, so no import was made. The
+ * variants in `liveVariantIds` are already listed on Decathlon; the caller pushes their price and
+ * stock (OF24) instead, since a Shopify price change arrives as the same products/update webhook.
+ */
+export interface ProductUnchanged {
+  unchanged: true;
+  liveVariantIds: string[];
+  correlationId: string;
+}
+
+export type ProductSyncResult = ImportSubmission | ProductUnchanged | null;
+
+/** Why a category code can't hold products, or undefined when it can. Exported for the Mappings API. */
+export function categoryError(hierarchies: Array<{ code: string; label: string; parentCode: string }>, code: string): string | undefined {
+  const node = hierarchies.find((h) => h.code === code);
+  if (!node) return `Decathlon category "${code}" doesn't exist.`;
+  if (hierarchies.some((h) => h.parentCode === code)) {
+    return `Decathlon category ${code} "${node.label}" is a group of categories, not a category products can be listed in.`;
+  }
+  return undefined;
+}
+
+type ProductMappingRow = NonNullable<Awaited<ReturnType<typeof matchProductMapping>>["mapping"]>;
+
+/** Outcome of SyncEngine.prepareProductImport. */
+export type PreparedProduct =
+  | { kind: "inactive"; product: NormalizedProduct; itemLabel: string; message: string }
+  | { kind: "no-variants"; product: NormalizedProduct; itemLabel: string }
+  | { kind: "invalid"; product?: NormalizedProduct; itemLabel?: string; error: Error }
+  | {
+      kind: "ready";
+      product: NormalizedProduct;
+      variants: NormalizedVariant[];
+      itemLabel: string;
+      requestPayload: ProductImportRequest;
+      mappingByVariantId: Map<string, ProductMappingRow>;
+      existingDecathlonProductIdByVariantId: Map<string, string>;
+    };
+
+/** One product on the Mappings page's readiness check. */
+export interface ProductReadiness {
+  shopifyProductId: string;
+  title: string;
+  status: "ready" | "blocked" | "skipped";
+  variants: number;
+  /** Each thing to fix, in the merchant's terms. */
+  problems: string[];
+}
+
+/** The builder reports every missing attribute in one message ("...attributes: a; b; c") — split
+ *  it so the readiness check can list them one per line. */
+function splitProblems(message: string): string[] {
+  const marker = "is missing required Decathlon attributes: ";
+  const at = message.indexOf(marker);
+  return at === -1 ? [message] : message.slice(at + marker.length).split("; ").map((p) => p.trim()).filter(Boolean);
+}
+
+/** Order-independent fingerprint of one P41 row — what "unchanged" means for a variant. */
+export function hashImportRow(row: Record<string, unknown>): string {
+  const stable = Object.keys(row)
+    .sort()
+    .map((k) => [k, row[k]]);
+  return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+}
+
 export type PollOutcome =
   | { status: "PENDING" }
   | { status: "TERMINAL"; result: "SUCCESS" | "FAILED"; kind: "product" | "offer"; shopId: string; shopifyVariantIds: string[]; correlationId: string };
@@ -72,7 +144,7 @@ function describeProduct(title: string, skus: string[]): string {
  * Orchestrates the data flows documented in docs/architecture.md §5-7.
  *   - syncProduct / syncOffers / pollImportStatus  → Phase 4/5 (implemented)
  *   - importOrders                                  → Phase 6 (implemented)
- *   - syncFulfillment / syncRefund                  → Phase 7 (deferred, still stubs)
+ *   - syncFulfillment / syncRefund / syncReturns    → Phase 7 (implemented in order-lifecycle.ts)
  *
  * Every Decathlon request/response shape used here for P41/OF01/OF24/OR11 is UNCONFIRMED pending
  * live validation against the preprod sandbox (see the project plan's "Live validation" step) —
@@ -80,110 +152,75 @@ function describeProduct(title: string, skus: string[]): string {
  */
 export class SyncEngine {
   private readonly catalog: CatalogCache;
+  private readonly lifecycle: OrderLifecycleSync;
 
   constructor(private readonly deps: SyncEngineDeps) {
     this.catalog = new CatalogCache(deps.repositories, deps.decathlon, deps.logger);
+    this.lifecycle = new OrderLifecycleSync(deps);
   }
 
   // ── Product sync (Phase 4) ──────────────────────────────────────────────────────────────────
 
-  async syncProduct(payload: ProductSyncJobPayload): Promise<ImportSubmission | null> {
+  async syncProduct(payload: ProductSyncJobPayload): Promise<ProductSyncResult> {
     const { repositories, decathlon, shopify, logger } = this.deps;
     const shopId = payload.shopId;
     const correlationId = payload.correlationId ?? randomUUID();
     const syncJobId = await this.ensureSyncJob(shopId, "PRODUCT_SYNC", payload, payload.syncJobId);
 
-    const config = await repositories.syncConfigurations.getOrCreateDefault(shopId);
-
-    let raw: ProductWithVariantsResponse;
+    let prepared: PreparedProduct;
     try {
-      raw = await shopify.request<ProductWithVariantsResponse>(PRODUCT_WITH_VARIANTS_QUERY, {
-        id: payload.shopifyProductId,
-      });
+      prepared = await this.prepareProductImport(shopId, payload.shopifyProductId, { variantIds: payload.shopifyVariantIds });
     } catch (err) {
       await this.failJob(shopId, syncJobId, "PRODUCT_SYNC", correlationId, err);
       throw err; // transport-level failure — let BullMQ's job-level retry apply
     }
 
-    let product;
-    try {
-      product = normalizeShopifyProduct(raw, config.defaultCurrency);
-      product.categoryCode = await this.resolveCategoryCode(shopId, product);
-    } catch (err) {
-      // A missing metafield/SKU is a deterministic failure — retrying won't fix it, so log it as a
-      // terminal FAILED job/log rather than throwing (which would trigger 5 wasted BullMQ retries).
-      await this.failJob(shopId, syncJobId, "PRODUCT_SYNC", correlationId, err);
+    if (prepared.kind === "inactive") {
+      await repositories.syncLogs.write({
+        shopId,
+        syncJobId,
+        type: "PRODUCT_SYNC",
+        status: "SKIPPED",
+        correlationId,
+        itemLabel: prepared.itemLabel,
+        shopifyId: payload.shopifyProductId,
+        errorMessage: prepared.message,
+      });
+      await repositories.syncJobs.finish(syncJobId, "SKIPPED", prepared.message);
       return null;
     }
-
-    const variants = payload.shopifyVariantIds
-      ? product.variants.filter((v) => v.shopifyVariantId && payload.shopifyVariantIds!.includes(v.shopifyVariantId))
-      : product.variants;
-
-    if (variants.length === 0) {
+    if (prepared.kind === "no-variants") {
       await repositories.syncJobs.finish(syncJobId, "SKIPPED", "No matching variants to sync");
       return null;
     }
-
-    // PM11 ignores its filter param and always returns the full catalog-wide attribute list
-    // (confirmed live 2026-09-18) — one cache entry per shop, not per category. H11 is needed
-    // alongside it because required attributes are inherited from ancestor categories (see
-    // requiredAttributesForCategory) — the product's own category code isn't enough on its own.
-    const [attributes, hierarchies] = await Promise.all([this.catalog.attributes(shopId), this.catalog.hierarchies(shopId)]);
-    const ancestorCodes = product.categoryCode ? ancestorCodesFor(hierarchies, product.categoryCode) : [];
-
-    // Unlike PM11, VL11's `code` filter is real and matters: an unfiltered call returns Decathlon's
-    // entire value-list catalog across every category (multiple GB, confirmed live) — so only the
-    // specific lists actually referenced are fetched, each cached under its own list code: the
-    // category's (inherited) required LIST attributes, plus any LIST attribute the merchant set an
-    // override for in custom.decathlon_attributes.
-    const requiredForCategory = product.categoryCode
-      ? requiredAttributesForCategory(attributes, product.categoryCode, ancestorCodes)
-      : [];
-    const overriddenAttributes = Object.keys(product.attributes ?? {})
-      .map((code) => attributes.find((a) => a.code === code))
-      .filter((a): a is DecathlonAttribute => Boolean(a));
-    const neededListCodes = [
-      ...new Set([...requiredForCategory, ...overriddenAttributes].map((a) => a.valuesList).filter((c): c is string => Boolean(c))),
-    ];
-    const valueListArrays = await Promise.all(neededListCodes.map((code) => this.catalog.valueList(shopId, code)));
-    const valueLists = valueListArrays.flat();
-
-    // Duplicate-prevention pass (docs/sync-strategy.md §1 step 2): for any variant with no local
-    // mapping yet, check whether Decathlon already lists this shop_sku (e.g. listed by another tool
-    // before this app existed) so the mapping we write below points at the REAL existing product
-    // from the start, rather than leaving decathlonProductId blank and relying solely on the async
-    // P41 success report's SKU match to backfill it later.
-    const existingDecathlonProductIdByVariantId = new Map<string, string>();
-    for (const variant of variants) {
-      const match = await matchProductMapping(this.deps, shopId, { shopifyVariantId: variant.shopifyVariantId!, shopSku: variant.sku });
-      if (match.existingDecathlonProductId) {
-        existingDecathlonProductIdByVariantId.set(variant.shopifyVariantId!, match.existingDecathlonProductId);
-      }
-    }
-
-    // Explicit Shopify-value -> Decathlon-code mappings for every LIST attribute in play, so the
-    // builder can prefer a merchant's own decision over its name/label guessing.
-    const listAttributeCodes = [...new Set([...requiredForCategory, ...overriddenAttributes].map((a) => a.code))];
-    const valueMappings = await repositories.attributeValueMappings.mapFor(shopId, listAttributeCodes);
-
-    let requestPayload;
-    try {
-      requestPayload = buildProductImportPayload(variants.map((variant) => ({ product, variant })), {
-        attributes,
-        valueLists,
-        ancestorCodes,
-        manufacturerEmail: config.manufacturerEmail,
-        fallbackBrandName: config.fallbackBrandName,
-        valueMappings,
-      });
-    } catch (err) {
-      // A missing/unmappable required Decathlon attribute is deterministic — same as the categoryCode
-      // check above, retrying won't fix it without merchant action, so fail the job cleanly instead
-      // of submitting an incomplete row Decathlon would reject asynchronously anyway.
-      await this.failJob(shopId, syncJobId, "PRODUCT_SYNC", correlationId, err, describeProduct(product.title, variants.map((v) => v.sku)));
+    if (prepared.kind === "invalid") {
+      // Deterministic (missing category, metafield, attribute...) — retrying won't fix it without
+      // merchant action, so the job fails cleanly instead of burning BullMQ retries.
+      await this.failJob(shopId, syncJobId, "PRODUCT_SYNC", correlationId, prepared.error, prepared.itemLabel);
       return null;
     }
+    const { product, variants, mappingByVariantId, existingDecathlonProductIdByVariantId } = prepared;
+    let { requestPayload } = prepared;
+
+    // Skip what Decathlon already has. Rows are keyed by shop_sku = variant SKU (see the builder).
+    const variantBySku = new Map(variants.map((v) => [v.sku, v]));
+    const hashBySku = new Map(requestPayload.products.map((row) => [row.shop_sku, hashImportRow(row)]));
+    if (payload.trigger === "webhook") {
+      const changed = requestPayload.products.filter((row) => {
+        const mapping = mappingByVariantId.get(variantBySku.get(row.shop_sku)?.shopifyVariantId ?? "");
+        return mapping?.lastPayloadHash !== hashBySku.get(row.shop_sku);
+      });
+      if (changed.length === 0) {
+        const liveVariantIds = variants
+          .filter((v) => mappingByVariantId.get(v.shopifyVariantId!)?.decathlonProductId)
+          .map((v) => v.shopifyVariantId!);
+        await repositories.syncJobs.finish(syncJobId, "SKIPPED", "Nothing Decathlon uses changed since the last import");
+        logger.info({ event: "product_sync_unchanged", shopId, productId: payload.shopifyProductId, liveVariants: liveVariantIds.length });
+        return { unchanged: true, liveVariantIds, correlationId };
+      }
+      requestPayload = { ...requestPayload, products: changed };
+    }
+    const submitted = variants.filter((v) => requestPayload.products.some((row) => row.shop_sku === v.sku));
 
     let result;
     try {
@@ -198,16 +235,17 @@ export class SyncEngine {
       return null;
     }
 
-    for (const variant of variants) {
+    for (const variant of submitted) {
       await repositories.productMappings.upsertForVariant(shopId, payload.shopifyProductId, variant.shopifyVariantId!, {
         sku: variant.sku,
         ean: variant.ean,
         shopSku: variant.sku,
         decathlonProductId: existingDecathlonProductIdByVariantId.get(variant.shopifyVariantId!),
+        lastPayloadHash: hashBySku.get(variant.sku),
       });
     }
 
-    const itemLabel = describeProduct(product.title, variants.map((v) => v.sku));
+    const itemLabel = describeProduct(product.title, submitted.map((v) => v.sku));
 
     await repositories.syncLogs.write({
       shopId,
@@ -220,16 +258,173 @@ export class SyncEngine {
       requestSummary: maskSecrets(requestPayload) as object,
       responseSummary: maskSecrets(result) as object,
     });
-    await repositories.syncJobs.updateProgress(syncJobId, variants.length, variants.length);
-    logger.info({ event: "product_sync_submitted", shopId, importId: result.import_id, variantCount: variants.length });
+    await repositories.syncJobs.updateProgress(syncJobId, submitted.length, submitted.length);
+    logger.info({ event: "product_sync_submitted", shopId, importId: result.import_id, variantCount: submitted.length });
 
     return {
       importId: result.import_id,
       kind: "product",
-      shopifyVariantIds: variants.map((v) => v.shopifyVariantId!),
+      shopifyVariantIds: submitted.map((v) => v.shopifyVariantId!),
       correlationId,
       syncJobId,
       itemLabel,
+    };
+  }
+
+  /**
+   * Everything an import needs, short of sending it: fetch the Shopify product, check it is active,
+   * resolve its category (and refuse a category group), load Decathlon's attribute/value lists and
+   * the shop's mappings, and build the P41 rows. Shared by syncProduct and checkProduct, so the
+   * Mappings page's readiness check reports exactly what an import would refuse.
+   * Throws only on transport failures (Shopify unreachable); every data problem is a result.
+   */
+  async prepareProductImport(
+    shopId: string,
+    shopifyProductId: string,
+    opts: { variantIds?: string[]; skipDuplicateCheck?: boolean } = {},
+  ): Promise<PreparedProduct> {
+    const { repositories, shopify } = this.deps;
+    const config = await repositories.syncConfigurations.getOrCreateDefault(shopId);
+    const raw = await shopify.request<ProductWithVariantsResponse>(PRODUCT_WITH_VARIANTS_QUERY, { id: shopifyProductId });
+
+    let product: NormalizedProduct;
+    try {
+      product = normalizeShopifyProduct(raw, config.defaultCurrency);
+    } catch (err) {
+      return { kind: "invalid", error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    const itemLabel = describeProduct(product.title, product.variants.map((v) => v.sku));
+
+    // Only ACTIVE products are listed on Decathlon. The webhook and the bulk scan already filter on
+    // this; reaching here with a draft/archived product means its status changed after queueing.
+    // Checked before the category so an unfinished draft is "skipped", not a failure to fix.
+    if (product.status !== "ACTIVE") {
+      return {
+        kind: "inactive",
+        product,
+        itemLabel,
+        message: `"${product.title}" is ${(product.status ?? "not active").toLowerCase()} in Shopify — only active products are imported to Decathlon`,
+      };
+    }
+
+    const typeRule = product.productType ? await repositories.categoryMappings.findByProductType(shopId, product.productType) : null;
+    try {
+      product.categoryCode = await this.resolveCategoryCode(shopId, product);
+    } catch (err) {
+      return { kind: "invalid", product, itemLabel, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+
+    const variants = opts.variantIds
+      ? product.variants.filter((v) => v.shopifyVariantId && opts.variantIds!.includes(v.shopifyVariantId))
+      : product.variants;
+    if (variants.length === 0) return { kind: "no-variants", product, itemLabel };
+
+    // PM11 ignores its filter param and always returns the full catalog-wide attribute list
+    // (confirmed live 2026-09-18) — one cache entry per shop. H11 is needed alongside it because
+    // required attributes are inherited from ancestor categories (see requiredAttributesForCategory).
+    const [attributes, hierarchies] = await Promise.all([this.catalog.attributes(shopId), this.catalog.hierarchies(shopId)]);
+    const ancestorCodes = ancestorCodesFor(hierarchies, product.categoryCode);
+
+    // Products can only be listed in a specific (leaf) category. A group such as 100000 "Apparel,
+    // Footwear, Accessories" imports without complaint and is simply never publishable.
+    const categoryProblem = categoryError(hierarchies, product.categoryCode);
+    if (categoryProblem) {
+      return {
+        kind: "invalid",
+        product,
+        itemLabel,
+        error: new ValidationError(
+          `"${product.title}": ${categoryProblem} Pick a specific category on the Mappings page, or in the product's "Decathlon Category" metafield.`,
+        ),
+      };
+    }
+
+    // Unlike PM11, VL11's `code` filter is real and matters: an unfiltered call returns every value
+    // list in the catalog (multiple GB). Only the lists actually referenced are fetched and cached:
+    // the category's required LIST attributes, metafield overrides, and — when this product type has
+    // a size chart — Decathlon's size lists.
+    const requiredForCategory = requiredAttributesForCategory(attributes, product.categoryCode, ancestorCodes);
+    const overriddenAttributes = Object.keys(product.attributes ?? {})
+      .map((code) => attributes.find((a) => a.code === code))
+      .filter((a): a is DecathlonAttribute => Boolean(a));
+    const neededListCodes = [
+      ...new Set(
+        [...requiredForCategory, ...overriddenAttributes]
+          .map((a) => a.valuesList)
+          .filter((c): c is string => Boolean(c))
+          .concat(typeRule?.sizeChart ? SIZE_VALUE_LISTS : []),
+      ),
+    ];
+    const valueLists = (await Promise.all(neededListCodes.map((code) => this.catalog.valueList(shopId, code)))).flat();
+
+    // Duplicate-prevention pass (docs/sync-strategy.md §1 step 2): for any variant with no local
+    // mapping yet, check whether Decathlon already lists this shop_sku, so the mapping written after
+    // submission points at the REAL existing product from the start.
+    const existingDecathlonProductIdByVariantId = new Map<string, string>();
+    const mappingByVariantId = new Map<string, NonNullable<Awaited<ReturnType<typeof matchProductMapping>>["mapping"]>>();
+    for (const variant of variants) {
+      if (opts.skipDuplicateCheck) {
+        const mapping = await repositories.productMappings.findByVariant(shopId, variant.shopifyVariantId!);
+        if (mapping) mappingByVariantId.set(variant.shopifyVariantId!, mapping);
+        continue;
+      }
+      const match = await matchProductMapping(this.deps, shopId, { shopifyVariantId: variant.shopifyVariantId!, shopSku: variant.sku });
+      if (match.mapping) mappingByVariantId.set(variant.shopifyVariantId!, match.mapping);
+      if (match.existingDecathlonProductId) {
+        existingDecathlonProductIdByVariantId.set(variant.shopifyVariantId!, match.existingDecathlonProductId);
+      }
+    }
+
+    // The merchant's explicit decisions for every LIST attribute in play, plus brand and size, which
+    // are stored as value mappings too — the builder prefers them over any name matching.
+    const listAttributeCodes = [
+      ...new Set([...requiredForCategory, ...overriddenAttributes].map((a) => a.code).concat(BRAND_ATTRIBUTE_CODE, SIZE_ATTRIBUTE_CODE)),
+    ];
+    const valueMappings = await repositories.attributeValueMappings.mapFor(shopId, listAttributeCodes);
+
+    try {
+      const requestPayload = buildProductImportPayload(
+        variants.map((variant) => ({ product, variant })),
+        {
+          attributes,
+          valueLists,
+          ancestorCodes,
+          manufacturerEmail: config.manufacturerEmail,
+          fallbackBrandName: config.fallbackBrandName,
+          ...optionRoleNames(config),
+          valueMappings,
+          typeRule: typeRule
+            ? { productType: product.productType ?? typeRule.shopifyProductType, gender: typeRule.gender, sizeChart: typeRule.sizeChart }
+            : undefined,
+        },
+      );
+      return { kind: "ready", product, variants, itemLabel, requestPayload, mappingByVariantId, existingDecathlonProductIdByVariantId };
+    } catch (err) {
+      return {
+        kind: "invalid",
+        product,
+        itemLabel: describeProduct(product.title, variants.map((v) => v.sku)),
+        error: err instanceof Error ? err : new Error(String(err)),
+      };
+    }
+  }
+
+  /** Dry run of an import for the Mappings page: what would happen, without sending anything. */
+  async checkProduct(shopId: string, shopifyProductId: string): Promise<ProductReadiness> {
+    const prepared = await this.prepareProductImport(shopId, shopifyProductId, { skipDuplicateCheck: true });
+    const title = prepared.product?.title ?? shopifyProductId;
+    if (prepared.kind === "ready") {
+      return { shopifyProductId, title, status: "ready", variants: prepared.variants.length, problems: [] };
+    }
+    if (prepared.kind === "inactive" || prepared.kind === "no-variants") {
+      return { shopifyProductId, title, status: "skipped", variants: 0, problems: prepared.kind === "inactive" ? [prepared.message] : [] };
+    }
+    return {
+      shopifyProductId,
+      title,
+      status: "blocked",
+      variants: prepared.product?.variants.length ?? 0,
+      problems: splitProblems(prepared.error.message),
     };
   }
 
@@ -586,11 +781,11 @@ export class SyncEngine {
           type: "ORDER_IMPORT",
           status: "FAILED",
           correlationId,
-          decathlonId: dto.id ?? dto.commercial_id,
+          decathlonId: dto.order_id ?? dto.commercial_id,
           errorMessage: err instanceof Error ? err.message : String(err),
         });
       }
-      lastDate = dto.date_created ?? lastDate;
+      lastDate = dto.created_date ?? lastDate;
       await repositories.syncJobs.updateProgress(syncJobId, processed, orders.length);
     }
 
@@ -611,7 +806,9 @@ export class SyncEngine {
     const { repositories, shopify } = this.deps;
     const normalized = normalizeDecathlonOrder(dto);
 
-    const alreadyImported = await repositories.orderMappings.findByDecathlonOrderId(shopId, normalized.externalId);
+    const alreadyImported =
+      (await repositories.orderMappings.findByDecathlonOrderId(shopId, normalized.externalId)) ??
+      (normalized.commercialId ? await repositories.orderMappings.repairLegacyId(shopId, normalized.externalId, normalized.commercialId) : null);
     if (alreadyImported) return; // idempotent — already processed in an earlier (possibly overlapping) page
 
     const matchedVariantIdByLineId = new Map<string, string>();
@@ -656,14 +853,18 @@ export class SyncEngine {
     });
   }
 
-  // ── Fulfillment / refund push-back — deferred (see project plan) ───────────────────────────────
+  // ── Post-import lifecycle — see order-lifecycle.ts ──────────────────────────────────────────────
 
-  async syncFulfillment(_payload: FulfillmentSyncJobPayload): Promise<void> {
-    throw new Error("SyncEngine.syncFulfillment not implemented yet — see docs/architecture.md §7 (Phase 7)");
+  syncFulfillment(payload: FulfillmentSyncJobPayload): Promise<void> {
+    return this.lifecycle.syncFulfillment(payload);
   }
 
-  async syncRefund(_payload: RefundSyncJobPayload): Promise<void> {
-    throw new Error("SyncEngine.syncRefund not implemented yet — see docs/architecture.md §7 (Phase 7)");
+  syncRefund(payload: RefundSyncJobPayload): Promise<void> {
+    return this.lifecycle.syncRefund(payload);
+  }
+
+  syncReturns(payload: ReturnSyncJobPayload): Promise<void> {
+    return this.lifecycle.syncReturns(payload);
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
@@ -680,9 +881,9 @@ export class SyncEngine {
       if (rule) return rule.decathlonCategoryCode;
     }
     throw new ValidationError(
-      `"${product.title}" has no Decathlon category. Map its Shopify product type${
-        product.productType ? ` "${product.productType}"` : " (this product has none set)"
-      } on the Mappings page, or set a "Decathlon Category" metafield on the product itself.`,
+      product.productType
+        ? `"${product.title}" has no Decathlon category. Map its product type "${product.productType}" on the Mappings page, or set a "Decathlon Category" metafield on the product itself.`
+        : `"${product.title}" has no product type or Shopify product category. Give it a type under "Products without a type" on the Mappings page, then map that type to a Decathlon category.`,
     );
   }
 

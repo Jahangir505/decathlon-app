@@ -1,6 +1,16 @@
 import { DecathlonHttpClient, type DecathlonHttpClientOptions } from "./http-client";
 import { ImportResultSchema, ImportStatusResultSchema, parseOrThrow, RawPaginatedResponseSchema } from "./schemas";
 import type {
+  DecathlonCarrier,
+  DecathlonOrderDto,
+  DecathlonReturnDto,
+  DecathlonShipmentDto,
+  RefundBatchResult,
+  RefundInput,
+  ReturnBatchResult,
+  ShipmentBatchResult,
+  ShipmentInput,
+  ShipmentTracking,
   ImportResult,
   ImportStatusResult,
   OffsetPaginationParams,
@@ -233,11 +243,18 @@ export class DecathlonClient {
       .then((raw) => parseOrThrow(ImportResultSchema, raw, "OF24 upsertOffers"));
   }
 
-  // ── Orders (OR11/OR23/OR24/OR28) — Decathlon → Shopify import, Shopify → Decathlon fulfillment ──
+  // ── Orders (OR11) — Decathlon → Shopify import ──
+  //
+  // Every order-scoped path below was CONFIRMED live 2026-09-21 against preprod. Decathlon's own
+  // guide lists OR23 as `POST /api/orders/{id}/shipments` and OR28 as `POST /api/orders/{id}/refunds`;
+  // both return a bare `{"message":"Not Found"}` on this instance (the wrong-URL signature, see
+  // docs/api-mapping.md §4 item 11), while the generic Mirakl paths used here answer with real
+  // business validation. Same situation as VL11 — live behaviour beats either document.
 
   /**
    * Only fetches orders awaiting shipment, per Decathlon's guide: orders are auto-accepted (payment
-   * captured before order creation), so this app's job starts at SHIPPING status.
+   * captured before order creation), so this app's job starts at SHIPPING status. The filter is on
+   * the ORDER state (`order_state`); REFUNDED/CLOSED also appear as order-LINE states.
    */
   async listOrdersAwaitingShipment(pagination: OffsetPaginationParams = {}): Promise<RawPaginatedResponse> {
     const raw = await this.http.request("/api/orders", {
@@ -246,40 +263,114 @@ export class DecathlonClient {
     return parseOrThrow(RawPaginatedResponseSchema, raw, "OR11 listOrdersAwaitingShipment");
   }
 
-  /** Path per Decathlon's Zendesk guide — see docs/api-mapping.md §0 conflict note. */
-  confirmShipment(orderId: string, payload: unknown): Promise<unknown> {
-    return this.http.request(`/api/orders/${encodeURIComponent(orderId)}/shipments`, {
-      method: "POST",
-      body: payload,
-    });
+  /** OR11 filtered to specific `order_id`s (comma-separated, confirmed live) — the current state of
+   *  an order this app already imported, e.g. to see what is still refundable. */
+  async getOrders(orderIds: string[]): Promise<DecathlonOrderDto[]> {
+    const raw = (await this.http.request("/api/orders", {
+      query: { order_ids: orderIds.join(","), max: Math.max(orderIds.length, 1) },
+    })) as { orders?: DecathlonOrderDto[] };
+    return raw.orders ?? [];
   }
 
-  addShipmentTracking(orderId: string, shipmentId: string, payload: unknown): Promise<unknown> {
-    return this.http.request(
-      `/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(shipmentId)}`,
-      { method: "PUT", body: payload },
-    );
+  // ── Shipments (ST01/ST11/ST23, OR23/OR24) — Shopify → Decathlon ──
+
+  /**
+   * ST01 — create shipments, optionally partial (per order line and quantity) with tracking inline.
+   * This instance runs Mirakl's multi-shipment model: every historical order has ST11 shipment
+   * records with their own ids, which is what the guide's `{order_id}/shipments/{shipment_id}` wording
+   * describes. One Shopify fulfillment maps onto one of these.
+   *
+   * CONFIRMED live: `{shipments:[...]}` wrapper, 1–1000 entries. Answers **201 even when every
+   * shipment failed** — the outcome is in `shipment_errors[]` / `shipment_success[]`, so a 2xx alone
+   * means nothing. A shipment is refused unless its order is in state SHIPPING. UNCONFIRMED (no
+   * SHIPPING order has existed on preprod to test with): the exact fields of a `shipment_success`
+   * entry, and whether `shipped: true` is required for the order to advance to SHIPPED — unknown
+   * fields are ignored rather than rejected, so it is sent explicitly.
+   */
+  createShipments(shipments: ShipmentInput[]): Promise<ShipmentBatchResult> {
+    return this.http.request("/api/shipments", { method: "POST", body: { shipments }, retryPolicy: "rate-limit-only" });
   }
 
-  /** Used for ALL post-payment cancellation/return/price-adjustment cases per Decathlon's guide. */
-  refundOrder(orderId: string, payload: unknown): Promise<unknown> {
-    return this.http.request(`/api/orders/${encodeURIComponent(orderId)}/refunds`, {
-      method: "POST",
-      body: payload,
-    });
+  /** ST11 — shipments of one order (confirmed live: `{data:[{id, status, shipment_lines, tracking}]}`). */
+  async listShipments(orderId: string): Promise<DecathlonShipmentDto[]> {
+    const raw = (await this.http.request("/api/shipments", { query: { order_id: orderId } })) as {
+      data?: DecathlonShipmentDto[];
+    };
+    return raw.data ?? [];
+  }
+
+  /**
+   * ST23 — update tracking on existing shipments. CONFIRMED live: **POST** (PUT is 405), body
+   * `{shipments:[{id, tracking}]}`, 200 with per-shipment `shipment_errors`/`shipment_success`.
+   */
+  updateShipmentTracking(updates: Array<{ id: string; tracking: ShipmentTracking }>): Promise<ShipmentBatchResult> {
+    return this.http.request("/api/shipments/tracking", { method: "POST", body: { shipments: updates } });
+  }
+
+  /** OR23 — whole-order tracking. CONFIRMED live: `PUT /api/orders/{id}/tracking`, validates carrier_code. */
+  updateOrderTracking(orderId: string, tracking: ShipmentTracking): Promise<void> {
+    return this.http.request(`/api/orders/${encodeURIComponent(orderId)}/tracking`, { method: "PUT", body: tracking });
+  }
+
+  /** OR24 — mark the whole order shipped. CONFIRMED live: `PUT /api/orders/{id}/ship`, no body,
+   *  400 unless the order is in SHIPPING. */
+  markOrderShipped(orderId: string): Promise<void> {
+    return this.http.request(`/api/orders/${encodeURIComponent(orderId)}/ship`, { method: "PUT", emptyBody: true });
+  }
+
+  /** SH21 — carriers configured by the operator (`{carriers:[{code, label, tracking_url}]}`, confirmed
+   *  live). Not in Decathlon's guide, but it is the only source of valid `carrier_code` values. */
+  async listCarriers(): Promise<DecathlonCarrier[]> {
+    const raw = (await this.http.request("/api/shipping/carriers")) as { carriers?: DecathlonCarrier[] };
+    return raw.carriers ?? [];
+  }
+
+  // ── Refunds (OR28) — Shopify → Decathlon ──
+
+  /**
+   * OR28 — used for ALL post-payment cancellation/return/price-adjustment cases per Decathlon's
+   * guide. CONFIRMED live: `PUT /api/orders/refund`, body `{refunds:[...]}`, and the validation it
+   * applies — `currency_iso_code` is mandatory, `amount` must exceed 0.01 and stay below what is left
+   * to refund on the line, and the line must be SHIPPING/SHIPPED/TO_COLLECT/RECEIVED/INCIDENT_OPEN.
+   * Amounts are tax-included (the response echoes `order_tax_mode: "TAX_INCLUDED"`).
+   */
+  refundOrderLines(refunds: RefundInput[]): Promise<RefundBatchResult> {
+    return this.http.request("/api/orders/refund", { method: "PUT", body: { refunds }, retryPolicy: "rate-limit-only" });
+  }
+
+  /** RE01 — reasons of one type, e.g. REFUND (`{reasons:[{code, label}]}`, confirmed live). */
+  async listReasons(type: "REFUND" | string): Promise<Array<{ code: string; label: string }>> {
+    const raw = (await this.http.request(`/api/reasons/${encodeURIComponent(type)}`)) as {
+      reasons?: Array<{ code: string; label: string }>;
+    };
+    return raw.reasons ?? [];
   }
 
   // ── Accounting documents (DR11/DR74) ──
 
-  listDocumentRequests(pagination: OffsetPaginationParams = {}): Promise<unknown> {
+  listDocumentRequests(pagination: { limit?: number; page_token?: string } = {}): Promise<unknown> {
     return this.http.request("/api/document-request/requests", { query: { ...pagination } });
   }
 
-  uploadAccountingDocument(payload: unknown): Promise<unknown> {
-    return this.http.request("/api/document-request/documents/upload", { method: "POST", body: payload });
+  /**
+   * DR74 — CONFIRMED live: a JSON body gets 415, so this is a multipart upload like P41/OF01. The
+   * form field names are UNCONFIRMED; nothing calls this yet because Shopify has no invoice PDF to
+   * send (see docs/api-mapping.md §4 item 13).
+   */
+  uploadAccountingDocument(file: { filename: string; content: string; contentType: string }, fields: Record<string, string>): Promise<unknown> {
+    return this.http.requestMultipart(
+      "/api/document-request/documents/upload",
+      { fieldName: "files", ...file },
+      undefined,
+      fields,
+    );
   }
 
   // ── Returns (RT30/RT31/RT12/RT01/RT11/RT04/RT29) ──
+  //
+  // CONFIRMED live 2026-09-21: RT11/RT12 use seek pagination (`limit` + `page_token`, envelope
+  // `{data, next_page_token}`), and every write takes a `{returns:[...]}` wrapper and answers 200
+  // with per-return `return_errors`/`return_success`. RT30/RT31 are 403 for this seller's key.
 
   getOperatorReturnConfig(): Promise<unknown> {
     return this.http.request("/api/returns/operator_configuration");
@@ -289,24 +380,35 @@ export class DecathlonClient {
     return this.http.request("/api/returns/shop_configuration");
   }
 
-  getItemsToReturn(): Promise<unknown> {
-    return this.http.request("/api/returns/items_to_return");
+  /** RT12 — 400 without a filter; `order_commercial_id` or `order_line_id` is required. */
+  getItemsToReturn(filter: { order_commercial_id?: string; order_line_id?: string }): Promise<unknown> {
+    return this.http.request("/api/returns/items_to_return", { query: filter });
   }
 
-  createReturn(payload: unknown): Promise<unknown> {
-    return this.http.request("/api/returns", { method: "POST", body: payload });
+  createReturns(returns: unknown[]): Promise<ReturnBatchResult> {
+    return this.http.request("/api/returns", { method: "POST", body: { returns } });
   }
 
-  listReturns(pagination: OffsetPaginationParams = {}): Promise<unknown> {
-    return this.http.request("/api/returns", { query: { ...pagination } });
+  /** RT11. Only `sort=date_created,<ASC|DESC>` is accepted; unknown filters are silently ignored,
+   *  but `order_commercial_id` genuinely filters. */
+  async listReturns(
+    params: { limit?: number; page_token?: string; order_commercial_id?: string; sort?: string } = {},
+  ): Promise<{ data: DecathlonReturnDto[]; next_page_token?: string | null }> {
+    const raw = (await this.http.request("/api/returns", { query: { ...params } })) as {
+      data?: DecathlonReturnDto[];
+      next_page_token?: string | null;
+    };
+    return { data: raw.data ?? [], next_page_token: raw.next_page_token };
   }
 
-  updateReturn(payload: unknown): Promise<unknown> {
-    return this.http.request("/api/returns", { method: "PUT", body: payload });
+  /** RT04 — e.g. `{id, rma}` or tracking/label updates. */
+  updateReturns(returns: Array<{ id: string; [field: string]: unknown }>): Promise<ReturnBatchResult> {
+    return this.http.request("/api/returns", { method: "PUT", body: { returns } });
   }
 
-  cancelReturn(returnId: string): Promise<unknown> {
-    return this.http.request("/api/returns/cancel", { method: "POST", body: { return_id: returnId } });
+  /** RT29 — CONFIRMED live: **PUT** (POST is 405), body `{returns:[{id}]}`. */
+  cancelReturns(returnIds: string[]): Promise<ReturnBatchResult> {
+    return this.http.request("/api/returns/cancel", { method: "PUT", body: { returns: returnIds.map((id) => ({ id })) } });
   }
 
   /**

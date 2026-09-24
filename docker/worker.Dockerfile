@@ -1,20 +1,16 @@
-FROM node:20-alpine AS base
+# BullMQ worker — no HTTP port. Migrations are applied by the backend service, not here.
+FROM node:20-bookworm-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo
 RUN corepack enable
 
-FROM base AS deps
-COPY package.json pnpm-workspace.yaml ./
-COPY packages ./packages
-COPY worker ./worker
-COPY prisma ./prisma
+FROM base AS build
+COPY . .
 RUN pnpm install --frozen-lockfile
-
-FROM deps AS build
-RUN pnpm --filter @shopify-decathlon/database prisma:generate || true
-RUN pnpm --filter @shopify-decathlon/worker build
+RUN pnpm prisma:generate
+RUN pnpm --filter "@shopify-decathlon/worker..." build
 
 FROM base AS runtime
 ENV NODE_ENV=production
 COPY --from=build /repo /repo
-WORKDIR /repo/worker
-CMD ["node", "dist/index.js"]
+CMD ["node", "worker/dist/index.js"]

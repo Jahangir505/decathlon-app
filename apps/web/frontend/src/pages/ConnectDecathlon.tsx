@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "../api/client";
 import { Banner, Button, Card, Checkbox, PageHeader, Select, TextField } from "../components/ui";
 
-interface ConnectionStatus {
+export interface ConnectionStatus {
   configured: boolean;
   environment?: "PRODUCTION" | "PREPROD";
   baseUrl?: string;
@@ -10,8 +10,9 @@ interface ConnectionStatus {
   lastTestedAt?: string | null;
 }
 
-interface SyncConfig {
+export interface SyncConfig {
   autoProductSyncEnabled: boolean;
+  productSyncScope: "ALL" | "SELECTED";
   autoOfferSyncEnabled: boolean;
   autoOrderImportEnabled: boolean;
   orderImportIntervalMinutes: number;
@@ -20,14 +21,26 @@ interface SyncConfig {
   defaultCurrency: string;
   manufacturerEmail: string | null;
   fallbackBrandName: string | null;
+  refundReasonCode: string | null;
+  setupCompletedAt?: string | null;
 }
 
-const ENVIRONMENT_BASE_URLS: Record<string, string> = {
+export const ENVIRONMENT_BASE_URLS: Record<string, string> = {
   PREPROD: "https://decathlonbelgium-preprod.mirakl.net/",
   PRODUCTION: "https://marketplace-decathlon-eu.mirakl.net/",
 };
 
-const CURRENCY_OPTIONS = [
+// Decathlon's refund reasons (RE01 `GET /api/reasons/REFUND`, read live 2026-09-21).
+const REFUND_REASON_OPTIONS = [
+  { label: "Automatic — Out of stock before shipping, Item returned after", value: "" },
+  { label: "15 — Out of stock", value: "15" },
+  { label: "16 — Cancelled by the client prior to shipping", value: "16" },
+  { label: "17 — Item returned", value: "17" },
+  { label: "18 — Item not received", value: "18" },
+  { label: "19 — Agreement found with the vendor", value: "19" },
+];
+
+export const CURRENCY_OPTIONS = [
   { label: "EUR — Euro", value: "EUR" },
   { label: "GBP — British Pound", value: "GBP" },
   { label: "USD — US Dollar", value: "USD" },
@@ -185,10 +198,21 @@ export function ConnectDecathlon() {
             <h3 className="text-sm font-semibold text-slate-900">Automatic sync</h3>
             <div className="mt-4 space-y-3">
               <Checkbox
-                label="Automatically push product changes to Decathlon"
+                label={
+                  syncConfig.productSyncScope === "SELECTED"
+                    ? "Automatically push changes to my selected products to Decathlon"
+                    : "Automatically push product changes to Decathlon"
+                }
                 checked={syncConfig.autoProductSyncEnabled}
                 onChange={(checked) => setSyncConfig({ ...syncConfig, autoProductSyncEnabled: checked })}
               />
+              <p className="-mt-1 ml-6 text-xs text-slate-500">
+                {syncConfig.productSyncScope === "SELECTED" ? "Only products you chose" : "All active products"} — change this on the{" "}
+                <a href="#/products" className="font-medium text-brand-600 hover:underline">
+                  Products
+                </a>{" "}
+                page.
+              </p>
               <Checkbox
                 label="Automatically push price/stock changes to Decathlon"
                 checked={syncConfig.autoOfferSyncEnabled}
@@ -284,6 +308,22 @@ export function ConnectDecathlon() {
               />
             </div>
 
+            <hr className="my-6 border-slate-200" />
+
+            <h3 className="text-sm font-semibold text-slate-900">Refunds &amp; cancellations</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Decathlon collects the customer's payment, so every refund or cancellation you make on a
+              Decathlon order in Shopify is sent to Decathlon, which refunds the customer.
+            </p>
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Select
+                label="Refund reason sent to Decathlon"
+                options={REFUND_REASON_OPTIONS}
+                value={syncConfig.refundReasonCode ?? ""}
+                onChange={(e) => setSyncConfig({ ...syncConfig, refundReasonCode: e.target.value === "" ? null : e.target.value })}
+              />
+            </div>
+
             <div className="mt-6 flex items-center gap-3">
               <Button variant="primary" loading={savingSyncConfig} onClick={handleSaveSyncConfig}>
                 Save sync settings
@@ -311,11 +351,11 @@ export function ConnectDecathlon() {
               <div className="mt-4">
                 <Banner tone={syncProductsNowResult.ok ? "success" : "critical"}>
                   {syncProductsNowResult.ok
-                    ? `Queued ${syncProductsNowResult.queued} product${syncProductsNowResult.queued === 1 ? "" : "s"} for sync` +
+                    ? `Queued ${syncProductsNowResult.queued} active${syncConfig.productSyncScope === "SELECTED" ? " selected" : ""} product${syncProductsNowResult.queued === 1 ? "" : "s"} for sync` +
                       (syncProductsNowResult.skippedNoCategory > 0
                         ? ` — skipped ${syncProductsNowResult.skippedNoCategory} without a Decathlon category set.`
                         : ".") +
-                      " Check Sync Logs shortly for results."
+                      " Draft and archived products are never imported. Check Sync Logs shortly for results."
                     : `Failed to queue product sync: ${syncProductsNowResult.error}`}
                 </Banner>
               </div>

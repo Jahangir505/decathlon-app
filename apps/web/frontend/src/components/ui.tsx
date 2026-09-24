@@ -129,11 +129,15 @@ export function Checkbox({
   );
 }
 
-export function Banner({ tone, children }: { tone: "success" | "critical"; children: ReactNode }) {
-  const styles =
-    tone === "success"
-      ? "bg-emerald-50 text-emerald-800 ring-emerald-600/20"
-      : "bg-red-50 text-red-800 ring-red-600/20";
+const BANNER_TONES = {
+  success: "bg-emerald-50 text-emerald-800 ring-emerald-600/20",
+  critical: "bg-red-50 text-red-800 ring-red-600/20",
+  attention: "bg-amber-50 text-amber-800 ring-amber-600/20",
+  info: "bg-blue-50 text-blue-800 ring-blue-600/20",
+} as const;
+
+export function Banner({ tone, children }: { tone: keyof typeof BANNER_TONES; children: ReactNode }) {
+  const styles = BANNER_TONES[tone];
   return <div className={`rounded-lg px-4 py-3 text-sm ring-1 ring-inset ${styles}`}>{children}</div>;
 }
 

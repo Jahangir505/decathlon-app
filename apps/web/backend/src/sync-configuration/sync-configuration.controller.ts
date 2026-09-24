@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { SessionTokenGuard, type AuthenticatedRequest } from "../auth/session-token.guard";
 import { SyncConfigurationService, type UpdateSyncConfigurationInput } from "./sync-configuration.service";
 
@@ -22,8 +22,33 @@ export class SyncConfigurationController {
     return this.service.syncOrdersNow(req.shopId);
   }
 
+  @Post("complete-setup")
+  completeSetup(@Req() req: AuthenticatedRequest) {
+    return this.service.completeSetup(req.shopId);
+  }
+
   @Post("sync-products-now")
   syncProductsNow(@Req() req: AuthenticatedRequest) {
     return this.service.syncProductsNow(req.shopId);
+  }
+
+  @Get("selected-products")
+  listSelectedProducts(@Req() req: AuthenticatedRequest) {
+    return this.service.listSelectedProducts(req.shopId);
+  }
+
+  @Post("selected-products")
+  addSelectedProducts(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { products: Array<{ shopifyProductId: string; title: string }> },
+  ) {
+    return this.service.addSelectedProducts(req.shopId, body?.products);
+  }
+
+  /** Takes the numeric id: a gid's slashes don't survive as a single path segment. */
+  @Delete("selected-products/:productId")
+  async removeSelectedProduct(@Req() req: AuthenticatedRequest, @Param("productId") productId: string) {
+    await this.service.removeSelectedProduct(req.shopId, `gid://shopify/Product/${productId}`);
+    return { removed: true };
   }
 }

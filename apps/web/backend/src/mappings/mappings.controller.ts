@@ -1,6 +1,13 @@
-import { Body, Controller, Delete, Get, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { SessionTokenGuard, type AuthenticatedRequest } from "../auth/session-token.guard";
-import { MappingsService } from "./mappings.service";
+import { BadRequestException } from "@nestjs/common";
+import { MappingsService, type MappingKind } from "./mappings.service";
+
+const KINDS: MappingKind[] = ["brand", "color", "size"];
+function kindOf(kind: string): MappingKind {
+  if (!KINDS.includes(kind as MappingKind)) throw new BadRequestException(`kind must be one of ${KINDS.join(", ")}`);
+  return kind as MappingKind;
+}
 
 @Controller("api/mappings")
 @UseGuards(SessionTokenGuard)
@@ -36,6 +43,16 @@ export class MappingsController {
     return this.mappings.shopifyProductTypes(req.shopId);
   }
 
+  @Get("shopify/untyped-products")
+  untypedProducts(@Req() req: AuthenticatedRequest) {
+    return this.mappings.untypedProducts(req.shopId);
+  }
+
+  @Post("shopify/product-type")
+  setProductType(@Req() req: AuthenticatedRequest, @Body() body: { productIds: string[]; productType: string }) {
+    return this.mappings.setProductType(req.shopId, body?.productIds, body?.productType);
+  }
+
   // ── Category rules ──────────────────────────────────────────────────────────────────────────
 
   @Get("categories")
@@ -54,6 +71,57 @@ export class MappingsController {
   @Delete("categories")
   deleteCategory(@Req() req: AuthenticatedRequest, @Query("productType") productType: string) {
     return this.mappings.deleteCategoryMapping(req.shopId, productType);
+  }
+
+  // ── Brand / colour / size (Shopify vendor or option value -> Decathlon value) ─────────────────
+
+  @Get("kind/:kind")
+  kindValues(@Req() req: AuthenticatedRequest, @Param("kind") kind: string) {
+    return this.mappings.optionValues(req.shopId, kindOf(kind));
+  }
+
+  @Post("kind/:kind")
+  saveKind(
+    @Req() req: AuthenticatedRequest,
+    @Param("kind") kind: string,
+    @Body() body: { shopifyValue: string; decathlonCode: string; decathlonLabel?: string },
+  ) {
+    return this.mappings.saveKindMapping(req.shopId, kindOf(kind), body.shopifyValue, body.decathlonCode, body.decathlonLabel);
+  }
+
+  @Post("kind/:kind/confirm-all")
+  confirmAll(@Req() req: AuthenticatedRequest, @Param("kind") kind: string) {
+    const k = kindOf(kind);
+    if (k === "size") throw new BadRequestException("Sizes resolve through each product type's size chart — set a chart instead");
+    return this.mappings.confirmAllExact(req.shopId, k);
+  }
+
+  @Get("reference/genders")
+  genders(@Req() req: AuthenticatedRequest) {
+    return this.mappings.genders(req.shopId);
+  }
+
+  @Get("reference/size-charts")
+  sizeCharts(@Req() req: AuthenticatedRequest, @Query("q") q?: string) {
+    return this.mappings.sizeCharts(req.shopId, q ?? "");
+  }
+
+  @Post("categories/details")
+  saveTypeDetails(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { productType: string; gender?: string | null; sizeChart?: string | null },
+  ) {
+    return this.mappings.saveTypeDetails(req.shopId, body.productType, { gender: body.gender, sizeChart: body.sizeChart });
+  }
+
+  @Get("readiness")
+  readiness(@Req() req: AuthenticatedRequest) {
+    return this.mappings.readiness(req.shopId);
+  }
+
+  @Delete("kind/:kind")
+  deleteKind(@Req() req: AuthenticatedRequest, @Param("kind") kind: string, @Query("shopifyValue") shopifyValue: string) {
+    return this.mappings.deleteKindMapping(req.shopId, kindOf(kind), shopifyValue);
   }
 
   // ── Attribute value rules (colour, and any other LIST attribute a category requires) ────────

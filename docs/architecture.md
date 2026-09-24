@@ -178,37 +178,58 @@ Because Decathlon **auto-accepts** orders before this app ever sees them (paymen
 there is no accept/refuse step (`OR21` is not used) — this app's job starts at "fetch orders awaiting
 shipment" and ends at "confirm shipment + push tracking".
 
-## 7. Data flow — fulfillment & refunds (Shopify → Decathlon)
+## 7. Data flow — fulfillment, refunds & returns
+
+Implemented in `packages/sync/src/order-lifecycle.ts`. Endpoint paths are the live-confirmed ones
+(docs/api-mapping.md §4 item 13), not the guide's, which 404.
 
 ```
-Shopify fulfillment created (webhook: FULFILLMENTS_CREATE)
+Shopify fulfillment (webhooks: fulfillments/create, fulfillments/update)
+        │  ignored unless the order has an OrderMapping (i.e. came from Decathlon)
+        ▼
+Claim ShipmentMapping(shopifyFulfillmentId)  ── already SUCCESS? → tracking changed? → ST23 POST /api/shipments/tracking
         │
         ▼
-Find OrderMapping by shopifyOrderId
+Map lines: `_decathlon_order_line_id` property → matched variant → SKU  (unmatched ⇒ fail, never guess)
+Map carrier: Shopify tracking company → SH21 carrier code, else free-text carrier_name + url
         │
         ▼
-Build shipment confirmation payload → POST .../shipments (OR23)
+ST01 POST /api/shipments {order_id, shipment_lines, tracking}  — 201 even on failure: read shipment_errors
         │
         ▼
-Build tracking payload (carrier, tracking number/url) → PUT .../shipments/{id} (OR24)
-        │
-        ▼
-Update OrderMapping.decathlonOrderStatus, write SyncLog
+ShipmentMapping SUCCESS + Decathlon shipment id, refresh OrderMapping.decathlonOrderStatus, SyncLog
 ```
 
 ```
-Shopify order cancelled / refunded (webhook: ORDERS_CANCELLED, or admin action)
+Shopify refund (webhook: refunds/create)          Shopify cancellation (webhook: orders/cancelled, +2 min delay)
+        │                                                 │
+        ▼                                                 ▼
+Claim RefundMapping(refund id | cancel:<order>) — each refund reaches Decathlon exactly once
         │
         ▼
-Find OrderMapping
-        │
+OR11 by order_id → per-line remaining amount / shipping / quantity (from each line's refunds[])
+        │   refund:  mapped lines (tax-incl.), shipping, amount-only gesture; capped to what's left
+        │   cancel:  everything left on lines still SHIPPING; shipped lines need an explicit refund
         ▼
-POST /api/orders/{id}/refunds (OR28) — used for ALL post-payment cancel/return/adjustment cases
-        │
-        ▼
-If a formal return record is needed: POST /api/returns (RT01), then PUT /api/returns (RT04) for
-tracking/RMA, or POST /api/returns/cancel (RT29) if the return itself is cancelled
+OR28 PUT /api/orders/refund  — reason: setting, else 15 (unshipped) / 17 (shipped) / 19 (gesture)
+        │   no HTTP retry except 429; an unconfirmed attempt is recorded, and the retry first checks
+        ▼   for new refund ids on the order before resending (Mirakl has no idempotency key)
+RefundMapping SUCCESS, SyncLog
 ```
+
+```
+Order-import schedule (same job, after OR11)
+        │
+        ▼
+RT11 newest 50 (sort=date_created,DESC) + each still-open ReturnMapping re-checked by order_commercial_id
+        │
+        ▼
+Upsert ReturnMapping; on new/changed state → tag Shopify order `decathlon-return`, `decathlon-return-<state>`
+(the refund for a return is the merchant's decision: refunding in Shopify sends OR28 as above)
+```
+
+Not wired up yet: RT01/RT04/RT29 (seller-initiated return actions) and DR74 invoice upload. The
+client methods exist, but nothing in Shopify produces the RMA/label or the invoice PDF they need.
 
 ## 8. Multi-tenancy
 

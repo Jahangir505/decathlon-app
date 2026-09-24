@@ -91,30 +91,6 @@ export const OfferImportRequestSchema = z.object({
   offers: z.array(OfferImportRowSchema),
 });
 
-/** UNCONFIRMED — see the matching type in types.ts for context. Every field optional by design:
- *  this is used defensively to parse a real response, not to validate one strictly. */
-export const DecathlonOrderDtoSchema = z
-  .object({
-    id: z.string().optional(),
-    commercial_id: z.string().optional(),
-    order_state_code: z.string().optional(),
-    currency_iso_code: z.string().optional(),
-    date_created: z.string().optional(),
-    order_lines: z.array(z.unknown()).optional(),
-    total_price: z.number().optional(),
-    shipping_price: z.number().optional(),
-  })
-  .passthrough();
-
-export const OrdersListResponseSchema = z
-  .object({
-    data: z.array(DecathlonOrderDtoSchema).optional(),
-    orders: z.array(DecathlonOrderDtoSchema).optional(),
-    total_count: z.number().optional(),
-    next_page_token: z.string().optional(),
-  })
-  .passthrough();
-
 // `S extends z.ZodTypeAny` + `z.infer<S>` (rather than matching the schema against `z.ZodType<T>`
 // directly) so TS reliably resolves T to the schema's OUTPUT type even when a field uses
 // `.transform()` (e.g. import_id's number-or-string -> string coercion above) — the more direct

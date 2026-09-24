@@ -20,7 +20,23 @@ export interface GraphqlResponse<T> {
 export class ShopifyAdminGraphqlClient {
   constructor(private readonly options: AdminGraphqlClientOptions) {}
 
+  /**
+   * Retries Shopify's rate limiting (HTTP 429, or a 200 with a THROTTLED GraphQL error) with
+   * backoff: the Mappings readiness check fetches up to 100 products back to back and was failing
+   * part-way through with "Throttled" instead of just slowing down.
+   */
   async request<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.requestOnce<T>(query, variables);
+      } catch (err) {
+        if (attempt >= 4 || !(err instanceof ShopifyApiError) || !isThrottled(err)) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+      }
+    }
+  }
+
+  private async requestOnce<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     const url = `https://${this.options.shopDomain}/admin/api/${this.options.apiVersion}/graphql.json`;
 
     const response = await fetch(url, {
@@ -54,6 +70,10 @@ export class ShopifyAdminGraphqlClient {
 
     return json.data;
   }
+}
+
+function isThrottled(err: ShopifyApiError): boolean {
+  return err.shopifyHttpStatus === 429 || /throttled/i.test(err.message);
 }
 
 export const SHOP_INFO_QUERY = /* GraphQL */ `

@@ -31,6 +31,94 @@ export interface ProductImportContext {
    *  Checked before any name/label matching: a merchant who has mapped "Navy" to a specific
    *  Decathlon colour means that one, and a fuzzy match must not quietly override it. */
   valueMappings?: Map<string, { decathlonCode: string }>;
+  /** Shopify option names that hold colour / size (case-insensitive). See optionRoleNames. */
+  colorOptionNames?: string[];
+  sizeOptionNames?: string[];
+  /** The product type's rule from the Mappings page: default gender and size chart. */
+  typeRule?: { productType: string; gender?: string | null; sizeChart?: string | null };
+}
+
+/** Decathlon's size vocabulary (see SIZE_VALUE_LISTS in docs): the retired t-shirt and shoe lists,
+ *  which between them hold every size chart for tops and footwear. Loaded when a type has a chart. */
+export const SIZE_VALUE_LISTS = ["size_cpn_7", "size_cpn_4"];
+export const GENDER_ATTRIBUTE_CODE = "Gender_apparel";
+
+/** "M (Z349: SIZE MEN TOP)" -> { chart: "Z349", chartName: "SIZE MEN TOP", value: "M" }. */
+export function parseSizeEntry(e: { code: string; label: string }): { chart: string; chartName?: string; value: string } {
+  const m = e.label.match(/^(.*?)\s*\((Z\d+):\s*([^)]*)\)\s*$/);
+  return { chart: e.code.split("_")[0]!, chartName: m?.[3]?.trim(), value: (m?.[1] ?? e.label).trim() };
+}
+
+/**
+ * The code in one Decathlon size chart for a Shopify size, or undefined. Tries, in order:
+ *   1. the chart's value equals the Shopify value ("M" -> "M (Z349: SIZE MEN TOP)"),
+ *   2. an EU size ("42" / "EU 42" -> "UK 8 - EU 42"),
+ *   3. a US shoe size, converted to UK (men: UK = US - 1, women: UK = US - 2) -> "UK 7 - EU 41".
+ * Among ties the shortest code wins (charts list some sizes twice, e.g. "Z349_M" and "Z349_M.").
+ */
+export function matchSizeInChart(entries: DecathlonValueListEntry[], chart: string, shopifyValue: string): DecathlonValueListEntry | undefined {
+  const inChart = entries.filter((e) => e.code.startsWith(`${chart}_`));
+  if (inChart.length === 0) return undefined;
+  const v = shopifyValue.trim().toLowerCase();
+  const val = (e: DecathlonValueListEntry) => parseSizeEntry(e).value.toLowerCase();
+  const pick = (f: (e: DecathlonValueListEntry) => boolean) =>
+    inChart.filter(f).sort((a, b) => a.code.length - b.code.length || a.code.localeCompare(b.code))[0];
+  const token = (n: string) => n.replace(".", "[.,]");
+
+  // "XXL" and "2XL" are the same size; charts use one or the other.
+  const aliases = new Set([v]);
+  const xs = v.match(/^(x+)(s|l)$/);
+  if (xs && xs[1]!.length >= 2) aliases.add(`${xs[1]!.length}x${xs[2]}`);
+  const nx = v.match(/^(\d)x(s|l)$/);
+  if (nx) aliases.add(`${"x".repeat(Number(nx[1]))}${nx[2]}`);
+  const exact = pick((e) => aliases.has(val(e)));
+  if (exact) return exact;
+
+  const eu = v.match(/^(?:eu\s*)?(\d+(?:[.,]5)?)$/)?.[1];
+  if (eu) {
+    const re = new RegExp(`\\beu\\s*${token(eu)}(?![\\d.,/-])`);
+    const hit = pick((e) => re.test(val(e)));
+    if (hit) return hit;
+  }
+
+  const us = v.match(/^us\s*(\d+(?:[.,]5)?)$/)?.[1];
+  if (us) {
+    const women = /women/i.test(parseSizeEntry(inChart[0]!).chartName ?? "");
+    const uk = String(Number(us.replace(",", ".")) - (women ? 2 : 1));
+    const re = new RegExp(`\\buk\\s*${token(uk)}(?![\\d.,/-])`);
+    const hit = pick((e) => re.test(val(e)));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** Decathlon attribute a variant's Shopify size is sent as. Its value list for most categories
+ *  isn't published to sellers (PM11 attaches it only to service categories), but Decathlon's own
+ *  transformed file carries a SIZE column for apparel and footwear, so it is the field to fill. */
+export const SIZE_ATTRIBUTE_CODE = "SIZE";
+/** Attribute code under which explicit vendor -> brand decisions are stored (AttributeValueMapping). */
+export const BRAND_ATTRIBUTE_CODE = "brandName";
+
+/** The Shopify option names treated as colour / size: the shop's configured name, else the usual ones. */
+export function optionRoleNames(config: { colorOptionName?: string | null; sizeOptionName?: string | null }): {
+  colorOptionNames: string[];
+  sizeOptionNames: string[];
+} {
+  const split = (v: string | null | undefined, fallback: string[]) =>
+    v?.trim() ? v.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : fallback;
+  return {
+    colorOptionNames: split(config.colorOptionName, ["color", "colour"]),
+    sizeOptionNames: split(config.sizeOptionName, ["size"]),
+  };
+}
+
+/** The variant's value for the first option whose name is one of `names` (case-insensitive). */
+export function optionValueFor(variant: NormalizedVariant, names: string[] | undefined): string | undefined {
+  if (!names?.length) return undefined;
+  for (const [name, value] of Object.entries(variant.optionValues ?? {})) {
+    if (names.includes(name.trim().toLowerCase()) && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 /** LIST attributes must map to one of Decathlon's own list entries: an explicit mapping the merchant
@@ -42,7 +130,9 @@ function resolveAttributeValue(
   valueLists: DecathlonValueListEntry[],
   valueMappings?: Map<string, { decathlonCode: string }>,
 ): string | undefined {
-  if (attr.type !== "LIST" || !attr.valuesList) return value;
+  // LIST_MULTIPLE_VALUES too: PM11 defines SPORT_ALL as that type on some branches (e.g. 100000), and
+  // a label passed through unresolved is rejected at transformation (2006 "not in the possible values").
+  if (!attr.type.startsWith("LIST") || !attr.valuesList) return value;
   const mapped = valueMappings?.get(attributeValueKey(attr.code, value));
   if (mapped) return mapped.decathlonCode;
   const match =
@@ -158,7 +248,14 @@ export function buildProductImportPayload(
             break;
           }
           const list = attr.valuesList;
-          // Exact match on the vendor first, then a looser substring match (handles things like
+          // The merchant's explicit vendor -> brand mapping wins outright: the guesses below can be
+          // confidently wrong (a vendor "Test Vendor" substring-matched the unrelated brand "test").
+          const explicit = context.valueMappings?.get(attributeValueKey(BRAND_ATTRIBUTE_CODE, product.brand));
+          if (explicit) {
+            row.brandName = explicit.decathlonCode;
+            break;
+          }
+          // Then an exact match on the vendor, then a looser substring match (handles things like
           // "Nike Inc." vs the catalog's "NIKE"), then the configured fallback brand (also tried
           // exact-then-fuzzy) — only after all of that fails is this treated as truly unmappable.
           const match =
@@ -178,6 +275,15 @@ export function buildProductImportPayload(
           }
           break;
         }
+        case GENDER_ATTRIBUTE_CODE:
+          // Metafield overrides were applied above, so reaching here means none was set: use the
+          // product type's gender from the Mappings page.
+          if (context.typeRule?.gender) row[GENDER_ATTRIBUTE_CODE] = context.typeRule.gender;
+          else
+            missing.push(
+              `${attr.label} (${attr.code}) — set a Gender for product type "${context.typeRule?.productType ?? product.productType ?? "(none)"}" on the Mappings page`,
+            );
+          break;
         case "GPSR_MANUFACTURER_EMAIL_ADDRESS":
           if (context.manufacturerEmail) row.GPSR_MANUFACTURER_EMAIL_ADDRESS = context.manufacturerEmail;
           else missing.push(`${attr.label} (${attr.code}) — set "Manufacturer email" on the Decathlon Connection page`);
@@ -185,9 +291,16 @@ export function buildProductImportPayload(
         default: {
           // Variant-level list attributes (e.g. a category's size list) can often be matched straight
           // from the variant's own Shopify option values ("M", "Blue") against Decathlon's list.
+          // Colour reads only the colour option and size attributes only the size option; anything
+          // else still tries every option value.
+          const roleNames =
+            attr.code === "color" ? context.colorOptionNames : /size/i.test(attr.code) ? context.sizeOptionNames : undefined;
+          const candidates = roleNames
+            ? [optionValueFor(variant, roleNames)].filter((v): v is string => Boolean(v))
+            : Object.values(variant.optionValues ?? {});
           const fromOptions =
             attr.variant && attr.type === "LIST" && attr.valuesList
-              ? Object.values(variant.optionValues ?? {})
+              ? candidates
                   .map((v) => resolveAttributeValue(attr, v, context.valueLists, context.valueMappings))
                   .find((v): v is string => v !== undefined)
               : undefined;
@@ -197,11 +310,31 @@ export function buildProductImportPayload(
             const where = `set it on the product's "Decathlon Attributes" metafield, e.g. {"${attr.code}": "${
               attr.type === "LIST" ? `<one of Decathlon's "${attr.valuesList}" values>` : "..."
             }"}`;
-            const variantNote = attr.variant ? " (also matched against each variant's Shopify option values)" : "";
+            const variantNote =
+              attr.code === "color"
+                ? ` (or add a "${context.colorOptionNames?.[0] ?? "Color"}" option to the product, and map its values on the Mappings page)`
+                : attr.variant
+                  ? " (also matched against each variant's Shopify option values)"
+                  : "";
             missing.push(`${attr.label} (${attr.code}) — ${where}${variantNote}`);
           }
         }
       }
+    }
+
+    // Size, per variant, from the size option — the shop's explicit Decathlon value if it mapped one,
+    // otherwise the Shopify value as-is. A SIZE set in the "Decathlon Attributes" metafield wins.
+    // With a size chart on the product type the value must resolve to a code in it: Decathlon
+    // silently empties a SIZE it doesn't recognise (confirmed live 2026-09-21), so an unresolved size
+    // is reported rather than sent. Without a chart the value is sent as-is, as before.
+    const size = optionValueFor(variant, context.sizeOptionNames);
+    if (size && (row[SIZE_ATTRIBUTE_CODE] === undefined || row[SIZE_ATTRIBUTE_CODE] === "")) {
+      const explicit = context.valueMappings?.get(attributeValueKey(SIZE_ATTRIBUTE_CODE, size))?.decathlonCode;
+      const chart = context.typeRule?.sizeChart;
+      const fromChart = !explicit && chart ? matchSizeInChart(context.valueLists, chart, size)?.code : undefined;
+      if (explicit || fromChart) row[SIZE_ATTRIBUTE_CODE] = explicit ?? fromChart;
+      else if (chart) missing.push(`Size "${size}" isn't in size chart ${chart} — map it on the Mappings page or pick another chart`);
+      else row[SIZE_ATTRIBUTE_CODE] = size;
     }
 
     if (missing.length > 0) {
@@ -260,11 +393,17 @@ export function extractOrdersArray(raw: RawPaginatedResponse | unknown): Decathl
   return [];
 }
 
-/** DecathlonOrderDto -> NormalizedOrder. Every field below is read defensively — UNCONFIRMED shape. */
+/**
+ * DecathlonOrderDto -> NormalizedOrder, against the OR11 shape CONFIRMED live 2026-09-21 (see
+ * DecathlonOrderDto). The legacy key names are still read as fallbacks, but the confirmed ones win.
+ */
 export function normalizeDecathlonOrder(dto: DecathlonOrderDto): NormalizedOrder {
-  const externalId = dto.id ?? dto.commercial_id;
+  // `order_id` (e.g. `GB5TWXPAN26F-A`) is what every order-scoped call — shipments, refunds —
+  // takes. This used to read a non-existent `id` and silently fall back to `commercial_id`, so
+  // imported orders were keyed on an id Decathlon's write endpoints don't accept.
+  const externalId = dto.order_id ?? asString(dto.id);
   if (!externalId) {
-    throw new ValidationError("Decathlon order has neither `id` nor `commercial_id` — cannot import");
+    throw new ValidationError("Decathlon order has no `order_id` — cannot import");
   }
 
   // Confirmed live 2026-09-18: `currency_iso_code` only ever appears at the order level in a real
@@ -274,27 +413,32 @@ export function normalizeDecathlonOrder(dto: DecathlonOrderDto): NormalizedOrder
   // orderCreate reject the order with a presentment-currency userError. Every line must inherit the
   // order's single currency instead.
   const currency = dto.currency_iso_code ?? "EUR";
+  const customer = dto.customer;
 
   return {
     externalId,
-    status: dto.order_state_code ?? "UNKNOWN",
+    commercialId: dto.commercial_id,
+    status: dto.order_state ?? asString(dto.order_state_code) ?? "UNKNOWN",
     currency,
-    createdAt: dto.date_created ?? new Date().toISOString(),
-    customer: normalizeCustomer(dto.customer),
-    shippingAddress: normalizeAddress(dto.shipping_address),
-    billingAddress: normalizeAddress(dto.billing_address),
+    createdAt: dto.created_date ?? asString(dto.date_created) ?? new Date().toISOString(),
+    customer: normalizeCustomer(customer, dto.customer_notification_email),
+    // Addresses are nested under `customer` — reading them from the order root (as this used to)
+    // imported every order with no shipping address at all.
+    shippingAddress: normalizeAddress(customer?.shipping_address ?? dto.shipping_address),
+    billingAddress: normalizeAddress(customer?.billing_address ?? dto.billing_address),
     items: (dto.order_lines ?? []).map((line, index) => normalizeOrderLine(line, index, currency)),
     totalAmount: dto.total_price,
     shippingAmount: dto.shipping_price,
   };
 }
 
-function normalizeCustomer(raw: unknown): NormalizedCustomer | undefined {
+function normalizeCustomer(raw: unknown, notificationEmail?: string): NormalizedCustomer | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const r = raw as Record<string, unknown>;
   return {
-    externalId: asString(r.id ?? r.customer_id),
-    email: asString(r.email),
+    externalId: asString(r.customer_id ?? r.id),
+    // OR11 has no customer email; `customer_notification_email` is the marketplace's relay address.
+    email: asString(r.email) ?? asString(notificationEmail),
     firstName: asString(r.firstname ?? r.first_name),
     lastName: asString(r.lastname ?? r.last_name),
     phone: asString(r.phone),
@@ -329,11 +473,16 @@ function normalizeAddress(raw: unknown): NormalizedAddress | undefined {
 
 function normalizeOrderLine(raw: unknown, index: number, orderCurrency: string): NormalizedOrderItem {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const quantity = asNumber(r.quantity) ?? 1;
+  // `price` is the line TOTAL (confirmed live: quantity 10, price_unit 2, price 20), so using it as
+  // the unit price multiplied every multi-quantity line's value by its quantity in Shopify.
+  const lineTotal = asNumber(r.price);
   return {
-    decathlonOrderLineId: asString(r.id ?? r.order_line_id) ?? `line-${index}`,
+    decathlonOrderLineId: asString(r.order_line_id ?? r.id) ?? `line-${index}`,
     sku: asString(r.offer_sku ?? r.shop_sku ?? r.sku) ?? "",
-    quantity: asNumber(r.quantity) ?? 1,
-    unitPrice: asNumber(r.price ?? r.unit_price) ?? 0,
+    title: asString(r.product_title),
+    quantity,
+    unitPrice: asNumber(r.price_unit) ?? (lineTotal !== undefined ? lineTotal / quantity : 0),
     // Order lines carry no currency field of their own — always the order's single currency.
     currency: orderCurrency,
     taxAmount: asNumber(r.tax_amount),

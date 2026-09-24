@@ -1,4 +1,4 @@
-import { DecathlonApiError, DecathlonRateLimitError } from "@shopify-decathlon/shared";
+import { DecathlonApiError, DecathlonOutcomeUnknownError, DecathlonRateLimitError } from "@shopify-decathlon/shared";
 
 export interface DecathlonHttpClientOptions {
   /** e.g. https://decathlonbelgium-preprod.mirakl.net/ — see docs/api-mapping.md §0 */
@@ -31,6 +31,13 @@ export interface RequestOptions {
    * body back as a string instead.
    */
   responseType?: "json" | "text";
+  /**
+   * "rate-limit-only" is for writes that must never be applied twice (OR28 refunds, ST01 shipments):
+   * only a 429 is retried, because only a 429 guarantees Decathlon did nothing. Anything else that
+   * leaves the outcome unknown (timeout, network error, 5xx) throws DecathlonOutcomeUnknownError
+   * instead of resending.
+   */
+  retryPolicy?: "default" | "rate-limit-only";
 }
 
 export interface MultipartFile {
@@ -69,6 +76,7 @@ export class DecathlonHttpClient {
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const method = opts.method ?? "GET";
     const url = this.buildUrl(path, opts.query);
+    const safeOnly = opts.retryPolicy === "rate-limit-only";
 
     let attempt = 0;
     let lastError: unknown;
@@ -108,6 +116,10 @@ export class DecathlonHttpClient {
           continue;
         }
 
+        if (safeOnly && response.status >= 500) {
+          throw new DecathlonOutcomeUnknownError(`${method} ${path}`, `HTTP ${response.status}`);
+        }
+
         if (RETRYABLE_STATUS.has(response.status) && attempt <= this.maxRetries) {
           await this.wait(this.backoffMs(attempt));
           continue;
@@ -116,7 +128,7 @@ export class DecathlonHttpClient {
         if (!response.ok) {
           const text = await response.text().catch(() => "");
           throw new DecathlonApiError(
-            `Decathlon API request failed: ${method} ${path} -> ${response.status}`,
+            `Decathlon API request failed: ${method} ${path} -> ${response.status}${text ? `: ${text.slice(0, 500)}` : ""}`,
             path,
             response.status,
             text,
@@ -142,6 +154,7 @@ export class DecathlonHttpClient {
         });
 
         if (err instanceof DecathlonApiError) throw err;
+        if (safeOnly) throw new DecathlonOutcomeUnknownError(`${method} ${path}`, err);
         if (attempt > this.maxRetries) break;
         await this.wait(this.backoffMs(attempt));
       }

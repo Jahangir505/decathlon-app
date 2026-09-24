@@ -125,6 +125,17 @@ async function enqueueFirstPoll(shopId: string, result: ImportSubmission): Promi
 registerWorker(QUEUE_NAMES.PRODUCT_SYNC, 5, (engine, payload: ProductSyncJobPayload) => engine.syncProduct(payload), {
   onResult: async (result, payload) => {
     if (!result) return;
+    if ("unchanged" in result) {
+      // No product import was needed, but products/update is also how a Shopify PRICE change
+      // arrives — so still refresh price & stock for whatever is already live on Decathlon.
+      if (result.liveVariantIds.length === 0) return;
+      await getQueue(QUEUE_NAMES.OFFER_SYNC).add(
+        "sync",
+        { shopId: payload.shopId, shopifyVariantIds: result.liveVariantIds, correlationId: result.correlationId } satisfies OfferSyncJobPayload,
+        { ...DEFAULT_JOB_RETRY_OPTIONS, jobId: `offer-sync:${payload.shopId}:${[...result.liveVariantIds].map(fromGid).sort().join(",")}` },
+      );
+      return;
+    }
     await enqueueFirstPoll(payload.shopId, result);
   },
 });
@@ -139,12 +150,27 @@ registerWorker(QUEUE_NAMES.OFFER_SYNC, 5, (engine, payload: OfferSyncJobPayload)
 // OR11 max usage: once/min (default tier) — see docs/api-mapping.md §2.4. One order-import job per
 // shop is enqueued on a schedule (see apps/web/backend's SchedulerModule), so concurrency=1 plus
 // this limiter is a defense-in-depth ceiling, not the primary pacing mechanism.
-registerWorker(QUEUE_NAMES.ORDER_IMPORT, 1, (engine, payload: OrderImportJobPayload) => engine.importOrders(payload), {
-  limiter: { max: 1, duration: 60_000 },
-});
+// Returns (RT11) ride along on the same schedule: there's no webhook for them either, and a return
+// only matters for an order this job has already imported. A returns failure must not fail the
+// order import, which is the part that has a customer waiting.
+registerWorker(
+  QUEUE_NAMES.ORDER_IMPORT,
+  1,
+  async (engine, payload: OrderImportJobPayload) => {
+    await engine.importOrders(payload);
+    try {
+      await engine.syncReturns({ shopId: payload.shopId, correlationId: payload.correlationId });
+    } catch (err) {
+      logger.error({ event: "return_sync_failed", shopId: payload.shopId, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+  { limiter: { max: 1, duration: 60_000 } },
+);
 
-registerWorker(QUEUE_NAMES.FULFILLMENT_SYNC, 5, (engine, payload: FulfillmentSyncJobPayload) => engine.syncFulfillment(payload));
-registerWorker(QUEUE_NAMES.REFUND_SYNC, 5, (engine, payload: RefundSyncJobPayload) => engine.syncRefund(payload));
+// Concurrency 1 for both: two jobs for the same order (e.g. a cancellation and its refund arriving
+// together) must not read Decathlon's "still refundable" figures at the same time.
+registerWorker(QUEUE_NAMES.FULFILLMENT_SYNC, 1, (engine, payload: FulfillmentSyncJobPayload) => engine.syncFulfillment(payload));
+registerWorker(QUEUE_NAMES.REFUND_SYNC, 1, (engine, payload: RefundSyncJobPayload) => engine.syncRefund(payload));
 
 // Fills the Phase 2 scaffold's gap: P41/OF01 are async submit-then-poll, and nothing previously
 // polled. Re-adds itself with a delay while PENDING; chains into offer-sync once a product import

@@ -4,7 +4,8 @@
  * `ProductVariant.inventoryQuantity` field, and sums across all locations per docs/sync-strategy.md §8
  * ("sum available quantity across all locations into one stock figure").
  *
- * The Decathlon category (H11 hierarchy code) is resolved from the product's `productType` via the
+ * The Decathlon category (H11 hierarchy code) is resolved from the product's `productType` (or, when
+ * that's blank, its Shopify standard category — see effectiveProductType) via the
  * shop's CategoryMapping rules, with a per-product `custom.decathlon_category` metafield overriding
  * it when set. A product that matches neither fails sync with a clear error (see packages/sync).
  */
@@ -13,10 +14,14 @@ export const PRODUCT_WITH_VARIANTS_QUERY = /* GraphQL */ `
   query ProductWithVariants($id: ID!) {
     product(id: $id) {
       id
+      status
       title
       descriptionHtml
       vendor
       productType
+      category {
+        name
+      }
       images(first: 10) {
         edges {
           node {
@@ -61,6 +66,22 @@ export const PRODUCT_WITH_VARIANTS_QUERY = /* GraphQL */ `
   }
 `;
 
+export type ShopifyProductStatus = "ACTIVE" | "DRAFT" | "ARCHIVED";
+
+/** Shopify's standard product category (taxonomy), e.g. { name: "T-Shirts" }. */
+export interface ShopifyTaxonomyCategory {
+  name: string;
+}
+
+/**
+ * The value category rules are matched against: the merchant's own product type, or — when that's
+ * blank, as it is on many imported catalogues — the name of the Shopify standard product category,
+ * which Shopify fills in automatically for most products. Empty string when neither is set.
+ */
+export function effectiveProductType(product: { productType?: string | null; category?: ShopifyTaxonomyCategory | null }): string {
+  return (product.productType ?? "").trim() || (product.category?.name ?? "").trim();
+}
+
 export interface ShopifyVariantNode {
   id: string;
   sku: string | null;
@@ -78,11 +99,14 @@ export interface ShopifyVariantNode {
 export interface ProductWithVariantsResponse {
   product: {
     id: string;
+    /** Only ACTIVE products are ever sent to Decathlon — DRAFT and ARCHIVED are skipped. */
+    status: ShopifyProductStatus;
     title: string;
     descriptionHtml: string | null;
     vendor: string | null;
     /** Matched against CategoryMapping.shopifyProductType to resolve the Decathlon category. */
     productType: string | null;
+    category: ShopifyTaxonomyCategory | null;
     images: { edges: Array<{ node: { url: string } }> };
     decathlonCategory: { value: string } | null;
     /** JSON object of Decathlon attribute code -> value, for required attributes this app can't derive
@@ -94,13 +118,14 @@ export interface ProductWithVariantsResponse {
 
 /**
  * Paginated product listing used by the "Sync products now" bulk action (apps/web/backend's
- * QueueProducerService.enqueueProductSyncAll) — walks every product in the shop so it can enqueue a
+ * QueueProducerService.enqueueProductSyncAll). Filtered to ACTIVE products server-side — drafts and
+ * archived products are never imported to Decathlon. Walks every active product so it can enqueue a
  * PRODUCT_SYNC job for each one that has the required decathlon_category metafield set, rather than
  * only reacting to future products/update webhooks.
  */
 export const PRODUCTS_PAGE_QUERY = /* GraphQL */ `
   query ProductsPage($cursor: String) {
-    products(first: 50, after: $cursor) {
+    products(first: 50, after: $cursor, query: "status:active") {
       pageInfo {
         hasNextPage
         endCursor
@@ -108,7 +133,11 @@ export const PRODUCTS_PAGE_QUERY = /* GraphQL */ `
       edges {
         node {
           id
+          status
           productType
+          category {
+            name
+          }
           decathlonCategory: metafield(namespace: "custom", key: "decathlon_category") {
             value
           }
@@ -121,8 +150,32 @@ export const PRODUCTS_PAGE_QUERY = /* GraphQL */ `
 export interface ProductsPageResponse {
   products: {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
-    edges: Array<{ node: { id: string; productType: string | null; decathlonCategory: { value: string } | null } }>;
+    edges: Array<{ node: { id: string; status: ShopifyProductStatus; productType: string | null; category: ShopifyTaxonomyCategory | null; decathlonCategory: { value: string } | null } }>;
   };
+}
+
+/** Same fields as PRODUCTS_PAGE_QUERY, for the merchant's hand-picked list (productSyncScope
+ *  SELECTED). Up to 250 ids per call; a deleted product comes back as null. */
+export const PRODUCTS_BY_IDS_QUERY = /* GraphQL */ `
+  query ProductsByIds($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Product {
+        id
+        status
+        productType
+        category {
+          name
+        }
+        decathlonCategory: metafield(namespace: "custom", key: "decathlon_category") {
+          value
+        }
+      }
+    }
+  }
+`;
+
+export interface ProductsByIdsResponse {
+  nodes: Array<ProductsPageResponse["products"]["edges"][number]["node"] | null>;
 }
 
 /** Resolves a webhook's numeric inventory_item_id (REST) back to its variant + product (GraphQL). */
@@ -163,4 +216,60 @@ export const VARIANTS_TO_PRODUCTS_QUERY = /* GraphQL */ `
 
 export interface VariantsToProductsResponse {
   nodes: Array<{ id: string; product: { id: string } } | null>;
+}
+
+/**
+ * What the Mappings page lists on the Shopify side: each active product's vendor (-> Decathlon
+ * brand) and option values (-> Decathlon colour / size). Active only, like everything imported.
+ */
+export const PRODUCT_FACETS_QUERY = /* GraphQL */ `
+  query ProductFacets($cursor: String) {
+    products(first: 100, after: $cursor, query: "status:active") {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        title
+        productType
+        category {
+          name
+        }
+        vendor
+        options {
+          name
+          values
+        }
+      }
+    }
+  }
+`;
+
+export interface ProductFacetsResponse {
+  products: {
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    nodes: Array<{ id: string; title: string; productType: string | null; category: ShopifyTaxonomyCategory | null; vendor: string | null; options: Array<{ name: string; values: string[] }> }>;
+  };
+}
+
+/** Sets the merchant's product type — used by the Mappings page to give untyped products a type in
+ *  bulk, so one category rule covers them instead of a metafield per product. */
+export const PRODUCT_SET_TYPE_MUTATION = /* GraphQL */ `
+  mutation ProductSetType($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
+      product {
+        id
+        productType
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export interface ProductSetTypeResponse {
+  productUpdate: { product: { id: string; productType: string } | null; userErrors: Array<{ field: string[] | null; message: string }> };
 }

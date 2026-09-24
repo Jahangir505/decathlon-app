@@ -1,23 +1,28 @@
 # Shopify CLI app configuration.
 # client_id is filled in by `shopify app config link` against your Partner Dashboard app —
 # do not hard-code real credentials here; this file is safe to commit.
-client_id = "dfbde3514120701190f0f5afe01543fc"
+client_id = "5aa6c179b0f7ae6eb02e814a2d290a17"
 name = "Decathlon Partner Sync"
-application_url = "https://dictate-resend-aerosol.ngrok-free.dev"
+application_url = "https://backend-production-7b40.up.railway.app"
 embedded = true
 # Custom monorepo layout (not the default web/ folder) — points the CLI at our shopify.web.toml files.
 web_directories = ["apps/web/backend", "apps/web/frontend"]
 
 [access_scopes]
-scopes = "read_products,write_products,read_orders,write_orders,read_inventory,write_inventory,read_fulfillments,write_fulfillments"
+scopes = "read_products,write_products,read_orders,write_orders,read_inventory,read_fulfillments"
 
 [auth]
 redirect_urls = [
-  "https://dictate-resend-aerosol.ngrok-free.dev/api/auth/callback"
+  "https://backend-production-7b40.up.railway.app/api/auth/callback"
 ]
 
 [webhooks]
 api_version = "2025-01"
+
+  # Mandatory privacy (GDPR) webhooks — required for the Shopify App Store.
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "/api/webhooks/compliance"
 
   [[webhooks.subscriptions]]
   topics = ["app/uninstalled"]
@@ -40,8 +45,12 @@ api_version = "2025-01"
   uri = "/api/webhooks/fulfillments-update"
 
   [[webhooks.subscriptions]]
+  topics = ["refunds/create"]
+  uri = "/api/webhooks/refunds-create"
+
+  [[webhooks.subscriptions]]
   topics = ["orders/cancelled"]
   uri = "/api/webhooks/orders-cancelled"
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false

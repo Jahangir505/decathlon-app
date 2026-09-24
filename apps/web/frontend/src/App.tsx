@@ -1,18 +1,37 @@
 import { useEffect, useState } from "react";
 import { HashRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { bootstrapSession } from "./api/client";
+import { apiGet, bootstrapSession } from "./api/client";
 import { Dashboard } from "./pages/Dashboard";
 import { ConnectDecathlon } from "./pages/ConnectDecathlon";
 import { Logs } from "./pages/Logs";
 import { Mappings } from "./pages/Mappings";
-import { HomeIcon, ListIcon, MapIcon, PlugIcon } from "./components/icons";
+import { Products } from "./pages/Products";
+import { Setup } from "./pages/Setup";
+import { BoxIcon, CheckCircleIcon, HomeIcon, ListIcon, MapIcon, PlugIcon } from "./components/icons";
 
 const NAV_ITEMS = [
   { path: "/", label: "Dashboard", icon: HomeIcon },
   { path: "/connect", label: "Decathlon Connection", icon: PlugIcon },
+  { path: "/products", label: "Products", icon: BoxIcon },
   { path: "/mappings", label: "Mappings", icon: MapIcon },
   { path: "/logs", label: "Sync Logs", icon: ListIcon },
+  { path: "/setup", label: "Setup guide", icon: CheckCircleIcon },
 ];
+
+/** Sends a shop that hasn't finished setup to the wizard, once per app load — the wizard links out
+ *  to Mappings, so redirecting on every navigation would trap the merchant. */
+function SetupRedirect({ setupDone }: { setupDone: boolean | null }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [redirected, setRedirected] = useState(false);
+  useEffect(() => {
+    if (setupDone === false && !redirected) {
+      setRedirected(true);
+      if (location.pathname !== "/setup") navigate("/setup", { replace: true });
+    }
+  }, [setupDone, redirected, location.pathname, navigate]);
+  return null;
+}
 
 function Sidebar() {
   const location = useLocation();
@@ -47,15 +66,20 @@ function Sidebar() {
 
 export default function App() {
   const [ready, setReady] = useState(false);
+  const [setupDone, setSetupDone] = useState<boolean | null>(null);
 
   useEffect(() => {
     bootstrapSession()
       .catch((err) => console.error("Failed to bootstrap embedded session", err))
+      .then(() => apiGet<{ setupCompletedAt?: string | null }>("/api/sync-configuration"))
+      .then((c) => setSetupDone(Boolean(c?.setupCompletedAt)))
+      .catch(() => setSetupDone(null))
       .finally(() => setReady(true));
   }, []);
 
   return (
     <HashRouter>
+      <SetupRedirect setupDone={ready ? setupDone : null} />
       <div className="flex min-h-screen bg-slate-50">
         <Sidebar />
         <main className="flex-1 overflow-y-auto px-8 py-8">
@@ -63,8 +87,10 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/connect" element={<ConnectDecathlon />} />
+              <Route path="/products" element={<Products />} />
               <Route path="/mappings" element={<Mappings />} />
               <Route path="/logs" element={<Logs />} />
+              <Route path="/setup" element={<Setup onComplete={() => setSetupDone(true)} />} />
             </Routes>
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading…</div>

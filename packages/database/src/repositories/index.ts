@@ -9,6 +9,8 @@ import { SyncConfigurationRepository } from "./sync-configuration.repository";
 import { WebhookEventRepository } from "./webhook-event.repository";
 import { DecathlonCatalogReferenceRepository } from "./decathlon-catalog-reference.repository";
 import { AttributeValueMappingRepository, CategoryMappingRepository } from "./mapping-rules.repository";
+import { SelectedProductRepository } from "./selected-product.repository";
+import { RefundMappingRepository, ReturnMappingRepository, ShipmentMappingRepository } from "./fulfillment.repository";
 
 export * from "./shop.repository";
 export * from "./mapping-rules.repository";
@@ -20,6 +22,8 @@ export * from "./sync-log.repository";
 export * from "./sync-configuration.repository";
 export * from "./webhook-event.repository";
 export * from "./decathlon-catalog-reference.repository";
+export * from "./fulfillment.repository";
+export * from "./selected-product.repository";
 
 /** Convenience bundle so consumers construct one object instead of wiring each repository by hand. */
 export function createRepositories(prisma: PrismaClient) {
@@ -35,6 +39,10 @@ export function createRepositories(prisma: PrismaClient) {
     catalogReferences: new DecathlonCatalogReferenceRepository(prisma),
     categoryMappings: new CategoryMappingRepository(prisma),
     attributeValueMappings: new AttributeValueMappingRepository(prisma),
+    shipmentMappings: new ShipmentMappingRepository(prisma),
+    refundMappings: new RefundMappingRepository(prisma),
+    returnMappings: new ReturnMappingRepository(prisma),
+    selectedProducts: new SelectedProductRepository(prisma),
   };
 }
 

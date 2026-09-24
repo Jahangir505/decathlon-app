@@ -48,7 +48,7 @@ export class ProductMappingRepository {
     shopId: string,
     shopifyProductId: string,
     shopifyVariantId: string,
-    data: { sku: string; ean?: string; shopSku: string; decathlonProductId?: string },
+    data: { sku: string; ean?: string; shopSku: string; decathlonProductId?: string; lastPayloadHash?: string },
   ): Promise<ProductMapping> {
     const { decathlonProductId, ...rest } = data;
     return this.prisma.productMapping.upsert({
@@ -84,6 +84,10 @@ export class ProductMappingRepository {
       where: { shopId_shopifyVariantId: { shopId, shopifyVariantId } },
       data: { status: "FAILED", lastError: error, retryCount: { increment: 1 } },
     });
+  }
+
+  findByProducts(shopId: string, shopifyProductIds: string[]): Promise<ProductMapping[]> {
+    return this.prisma.productMapping.findMany({ where: { shopId, shopifyProductId: { in: shopifyProductIds } } });
   }
 
   countByStatus(shopId: string) {
