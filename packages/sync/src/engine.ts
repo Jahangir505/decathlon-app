@@ -205,9 +205,22 @@ export class SyncEngine {
       return null;
     }
     if (prepared.kind === "invalid") {
-      // Deterministic (missing category, metafield, attribute...) — retrying won't fix it without
-      // merchant action, so the job fails cleanly instead of burning BullMQ retries.
-      await this.failJob(shopId, syncJobId, "PRODUCT_SYNC", correlationId, prepared.error, prepared.itemLabel);
+      // Not ready for Decathlon (missing category, metafield, attribute...): nothing is sent, so
+      // only ready products are imported. Recorded as skipped with the reason rather than failed —
+      // retrying won't fix it without merchant action, and the Mappings readiness check lists it.
+      const message = `Not ready for Decathlon, not imported: ${prepared.error.message}`;
+      await repositories.syncLogs.write({
+        shopId,
+        syncJobId,
+        type: "PRODUCT_SYNC",
+        status: "SKIPPED",
+        correlationId,
+        itemLabel: prepared.itemLabel,
+        shopifyId: payload.shopifyProductId,
+        errorMessage: message,
+      });
+      await repositories.syncJobs.finish(syncJobId, "SKIPPED", message);
+      logger.info({ event: "product_sync_not_ready", shopId, productId: payload.shopifyProductId });
       return null;
     }
     const { product, variants, mappingByVariantId, existingDecathlonProductIdByVariantId } = prepared;

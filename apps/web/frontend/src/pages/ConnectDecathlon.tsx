@@ -355,7 +355,7 @@ export function ConnectDecathlon() {
                       (syncProductsNowResult.skippedNoCategory > 0
                         ? ` — skipped ${syncProductsNowResult.skippedNoCategory} without a Decathlon category set.`
                         : ".") +
-                      " Draft and archived products are never imported. Check Sync Logs shortly for results."
+                      " Only products that pass the Mappings page's readiness check are imported; the rest are skipped with the reason in Sync Logs. Draft and archived products are never imported."
                     : `Failed to queue product sync: ${syncProductsNowResult.error}`}
                 </Banner>
               </div>

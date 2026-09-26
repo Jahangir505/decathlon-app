@@ -85,7 +85,8 @@ describe("syncProduct — only active products are imported", () => {
     const t = setup("ACTIVE");
     await t.run();
     expect(t.repositories.categoryMappings.findByProductType).toHaveBeenCalled();
-    expect(t.logs[0]).toMatchObject({ status: "FAILED", errorMessage: expect.stringContaining("no Decathlon category") });
+    expect(t.logs[0]).toMatchObject({ status: "SKIPPED", errorMessage: expect.stringContaining("no Decathlon category") });
+    expect(t.jobs).toEqual([["job1", "SKIPPED", expect.stringContaining("Not ready for Decathlon")]]);
   });
 });
 

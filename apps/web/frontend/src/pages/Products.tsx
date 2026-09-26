@@ -116,7 +116,7 @@ export function Products() {
         { products: picked.map((p) => ({ shopifyProductId: p.id, title: p.title })) },
       );
       const parts = [`Added ${result.added} product${result.added === 1 ? "" : "s"}.`];
-      if (result.queued > 0) parts.push(`${result.queued} sent to Decathlon — check Sync Logs shortly.`);
+      if (result.queued > 0) parts.push(`${result.queued} queued — those ready for Decathlon are imported, the rest are skipped with the reason in Sync Logs.`);
       if (result.skippedNoCategory > 0)
         parts.push(`${result.skippedNoCategory} have no Decathlon category yet; set one on the Mappings page and they'll sync on their next edit or "Sync products now".`);
       setMessage({ tone: result.skippedNoCategory > 0 ? "attention" : "success", text: parts.join(" ") });
