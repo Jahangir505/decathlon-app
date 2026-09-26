@@ -55,6 +55,36 @@ export class MappingsController {
 
   // ── Category rules ──────────────────────────────────────────────────────────────────────────
 
+  @Get("categories/suggestions")
+  categorySuggestions(@Req() req: AuthenticatedRequest) {
+    return this.mappings.categorySuggestions(req.shopId);
+  }
+
+  @Post("categories/apply-suggestions")
+  applyCategorySuggestions(@Req() req: AuthenticatedRequest, @Body() body: { productTypes?: string[] }) {
+    return this.mappings.applyCategorySuggestions(req.shopId, Array.isArray(body?.productTypes) ? body.productTypes : undefined);
+  }
+
+  @Get("categories/attributes")
+  typeAttributes(@Req() req: AuthenticatedRequest, @Query("productType") productType: string) {
+    if (!productType) throw new BadRequestException("productType is required");
+    return this.mappings.typeAttributes(req.shopId, productType);
+  }
+
+  @Post("categories/attributes")
+  saveTypeAttribute(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { productType: string; attributeCode: string; value: { code: string; label?: string } | null; applyToAll?: boolean },
+  ) {
+    if (!body?.productType || !body?.attributeCode) throw new BadRequestException("productType and attributeCode are required");
+    return this.mappings.saveTypeAttribute(req.shopId, body.productType, body.attributeCode, body.value ?? null, Boolean(body.applyToAll));
+  }
+
+  @Post("categories/attributes/fill-suggestions")
+  fillTypeAttributeSuggestions(@Req() req: AuthenticatedRequest, @Body() body: { productTypes?: string[] }) {
+    return this.mappings.fillTypeAttributeSuggestions(req.shopId, Array.isArray(body?.productTypes) ? body.productTypes : undefined);
+  }
+
   @Get("categories")
   listCategories(@Req() req: AuthenticatedRequest) {
     return this.mappings.listCategoryMappings(req.shopId);

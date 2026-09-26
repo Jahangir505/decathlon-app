@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDelete, apiGet, apiPost } from "../api/client";
-import { Badge, Banner, Button, Card, EmptyState, PageHeader, Select, SkeletonLine, TextField } from "../components/ui";
+import { Badge, Banner, Button, Card, Checkbox, EmptyState, Modal, PageHeader, Select, SkeletonLine, TextField } from "../components/ui";
 
 interface ProductType {
   productType: string;
@@ -35,6 +35,12 @@ interface CategoryOption {
   level: number;
   deprecated: boolean;
   leaf: boolean;
+}
+interface CategorySuggestion {
+  code: string;
+  label: string;
+  path: string;
+  exact: boolean;
 }
 type MappingKind = "brand" | "color" | "size";
 interface OptionValueRow {
@@ -138,7 +144,61 @@ function CategoryPicker({ onPick, onCancel }: { onPick: (c: CategoryOption) => v
 }
 
 /** Top of the page: the real import checks, run on every active product without sending anything. */
+const PREVIEW_COUNT = 2;
+
+type BlockedItem = Readiness["products"][number];
+
+function BlockedProduct({ product }: { product: BlockedItem }) {
+  return (
+    <li className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+      <p className="text-sm font-medium text-amber-900">{product.title}</p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-800">
+        {product.problems.map((x, i) => (
+          <li key={i}>{x}</li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+/** Every product that fails the import checks, searchable by product name or error text. */
+function AllErrorsModal({ products, onClose }: { products: BlockedItem[]; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return products;
+    return products.filter((p) => p.title.toLowerCase().includes(q) || p.problems.some((x) => x.toLowerCase().includes(q)));
+  }, [products, query]);
+  return (
+    <Modal title={`${products.length} products with errors`} onClose={onClose} size="lg">
+      <div className="sticky top-0 z-10 bg-white pb-3">
+        <TextField
+          label="Search"
+          placeholder="Product name or error, e.g. size, EAN, Hoodies"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query.trim() ? (
+          <p className="mt-1 text-xs text-slate-500">
+            {visible.length} of {products.length} match
+          </p>
+        ) : null}
+      </div>
+      {visible.length === 0 ? (
+        <p className="py-6 text-center text-sm text-slate-500">No products match &ldquo;{query}&rdquo;.</p>
+      ) : (
+        <ul className="space-y-3">
+          {visible.map((p) => (
+            <BlockedProduct key={p.shopifyProductId} product={p} />
+          ))}
+        </ul>
+      )}
+    </Modal>
+  );
+}
+
 function ReadinessSection({ refreshKey }: { refreshKey: number }) {
+  const [showAll, setShowAll] = useState(false);
   const [data, setData] = useState<Readiness | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -185,19 +245,20 @@ function ReadinessSection({ refreshKey }: { refreshKey: number }) {
             {data.blocked === 0 ? <span className="ml-2 text-slate-600">Every active product passes the import checks.</span> : null}
           </p>
           {blocked.length > 0 ? (
-            <ul className="mt-3 space-y-3">
-              {blocked.map((p) => (
-                <li key={p.shopifyProductId} className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                  <p className="text-sm font-medium text-amber-900">{p.title}</p>
-                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-800">
-                    {p.problems.map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </li>
-              ))}
-            </ul>
+            <>
+              <ul className="mt-3 space-y-3">
+                {blocked.slice(0, PREVIEW_COUNT).map((p) => (
+                  <BlockedProduct key={p.shopifyProductId} product={p} />
+                ))}
+              </ul>
+              {blocked.length > PREVIEW_COUNT ? (
+                <div className="mt-3">
+                  <Button onClick={() => setShowAll(true)}>View all {blocked.length} products with errors</Button>
+                </div>
+              ) : null}
+            </>
           ) : null}
+          {showAll ? <AllErrorsModal products={blocked} onClose={() => setShowAll(false)} /> : null}
         </div>
       )}
     </Card>
@@ -381,6 +442,139 @@ function UntypedSection({ onChange, refreshKey }: { onChange: () => void; refres
   );
 }
 
+interface TypeAttributeNeed {
+  code: string;
+  label: string;
+  type: string;
+  valuesList: string | null;
+  current: ValueOption | null;
+  suggestion: ValueOption | null;
+}
+
+function AttributeValuePicker({
+  need,
+  onPick,
+  onCancel,
+}: {
+  need: TypeAttributeNeed;
+  onPick: (v: ValueOption, applyToAll: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [applyToAll, setApplyToAll] = useState(true);
+  const isList = need.type.startsWith("LIST") && need.valuesList;
+  const { results, loading } = useRemoteSearch<ValueOption>(
+    isList ? `/api/mappings/reference/values?listCode=${encodeURIComponent(need.valuesList!)}` : null,
+    query,
+  );
+  return (
+    <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <TextField
+        label={isList ? `Search Decathlon values for ${need.label}` : `Value for ${need.label}`}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {isList ? (
+        <div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-slate-200 bg-white">
+          {loading ? (
+            <div className="p-3"><SkeletonLine /></div>
+          ) : results.length === 0 ? (
+            <p className="p-3 text-sm text-slate-500">No values match.</p>
+          ) : (
+            results.map((v) => (
+              <button
+                key={v.code}
+                onClick={() => onPick(v, applyToAll)}
+                className="flex w-full items-center justify-between border-b border-slate-100 px-3 py-2 text-left text-sm last:border-b-0 hover:bg-brand-50"
+              >
+                <span className="text-slate-900">{v.label}</span>
+                <span className="font-mono text-xs text-slate-400">{v.code}</span>
+              </button>
+            ))
+          )}
+        </div>
+      ) : null}
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <Checkbox label="Also use for my other product types that need it" checked={applyToAll} onChange={setApplyToAll} />
+        {!isList ? (
+          <Button variant="primary" disabled={!query.trim()} onClick={() => onPick({ code: query.trim(), label: query.trim() }, applyToAll)}>
+            Save
+          </Button>
+        ) : null}
+        <Button onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+/** The category's other required attributes (sport, condition, product nature, ...) that Shopify
+ *  has no field for, set once for the whole product type. */
+function TypeAttributes({ productType, refreshKey, onChange }: { productType: string; refreshKey: number; onChange: () => void }) {
+  const [needs, setNeeds] = useState<TypeAttributeNeed[] | null>(null);
+  const [picking, setPicking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    apiGet<TypeAttributeNeed[]>(`/api/mappings/categories/attributes?productType=${encodeURIComponent(productType)}`)
+      .then(setNeeds)
+      .catch((e) => {
+        setNeeds([]);
+        setError(e instanceof Error ? e.message : String(e));
+      });
+  }, [productType]);
+  useEffect(load, [load, refreshKey]);
+
+  async function save(code: string, value: ValueOption | null, applyToAll = false) {
+    try {
+      await apiPost("/api/mappings/categories/attributes", { productType, attributeCode: code, value, applyToAll });
+      setError(null);
+      setPicking(null);
+      load();
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  if (!needs || (needs.length === 0 && !error)) return null;
+  return (
+    <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Other Decathlon attributes</p>
+      {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
+      <div className="mt-1 divide-y divide-slate-200">
+        {needs.map((n) => (
+          <div key={n.code} className="py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm text-slate-700">{n.label}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {n.current ? (
+                  <span className="text-sm text-slate-900">
+                    {n.current.label} <span className="font-mono text-xs text-slate-400">{n.current.code}</span>
+                  </span>
+                ) : n.suggestion ? (
+                  <>
+                    <span className="text-xs text-slate-500">
+                      Suggested: <span className="font-medium text-slate-700">{n.suggestion.label}</span>
+                    </span>
+                    <Button onClick={() => save(n.code, n.suggestion, true)}>Use</Button>
+                  </>
+                ) : (
+                  <Badge tone="attention">Needed</Badge>
+                )}
+                <Button onClick={() => setPicking(picking === n.code ? null : n.code)}>{n.current ? "Change" : "Choose"}</Button>
+                {n.current ? <Button onClick={() => save(n.code, null)}>Clear</Button> : null}
+              </div>
+            </div>
+            {picking === n.code ? (
+              <AttributeValuePicker need={n} onPick={(v, all) => save(n.code, v, all)} onCancel={() => setPicking(null)} />
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CategorySection({ onChange, refreshKey }: { onChange: () => void; refreshKey: number }) {
   const [types, setTypes] = useState<ProductType[] | null>(null);
   const [rules, setRules] = useState<CategoryMappingRow[]>([]);
@@ -388,6 +582,9 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
   const [editingChart, setEditingChart] = useState<string | null>(null);
   const [genders, setGenders] = useState<ValueOption[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<Map<string, CategorySuggestion>>(new Map());
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<string | null>(null);
 
   useEffect(() => {
     apiGet<ValueOption[]>("/api/mappings/reference/genders").then(setGenders).catch(() => setGenders([]));
@@ -407,6 +604,9 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
 
   const load = useCallback(() => {
     apiGet<CategoryMappingRow[]>("/api/mappings/categories").then(setRules).catch(() => setRules([]));
+    apiGet<Array<{ productType: string; suggestion: CategorySuggestion | null }>>("/api/mappings/categories/suggestions")
+      .then((rows) => setSuggestions(new Map(rows.filter((r) => r.suggestion).map((r) => [r.productType, r.suggestion!]))))
+      .catch(() => setSuggestions(new Map()));
     apiGet<ProductType[]>("/api/mappings/shopify/product-types")
       .then(setTypes)
       .catch((e) => {
@@ -431,6 +631,46 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
     }
   }
 
+  async function applySuggestions(productTypes?: string[]) {
+    setApplying(true);
+    setApplyResult(null);
+    try {
+      const res = await apiPost<{ saved: number; unmatched: string[] }>("/api/mappings/categories/apply-suggestions", { productTypes });
+      setError(null);
+      if (!productTypes) {
+        setApplyResult(
+          `Mapped ${res.saved} product type${res.saved === 1 ? "" : "s"}. Check each category below and use Change if one is wrong.` +
+            (res.unmatched.length ? ` No match found for: ${res.unmatched.join(", ")} — map these by hand.` : ""),
+        );
+      }
+      load();
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  async function fillAttributeSuggestions() {
+    setApplying(true);
+    setApplyResult(null);
+    try {
+      const res = await apiPost<{ filled: number; sizeCharts: number; stillMissing: number }>("/api/mappings/categories/attributes/fill-suggestions", {});
+      setError(null);
+      setApplyResult(
+        `Set ${res.sizeCharts} size chart${res.sizeCharts === 1 ? "" : "s"} and ${res.filled} attribute value${res.filled === 1 ? "" : "s"}.` +
+          (res.stillMissing ? ` ${res.stillMissing} still need a value — look for "Needed" under each product type.` : ""),
+      );
+      load();
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
   async function clear(productType: string) {
     await apiDelete(`/api/mappings/categories?productType=${encodeURIComponent(productType)}`);
     load();
@@ -446,6 +686,24 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
         &ldquo;Decathlon Category&rdquo; or &ldquo;Decathlon Attributes&rdquo; metafield overrides the rule.
       </p>
 
+      {suggestions.size > 0 ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-brand-50 px-4 py-3">
+          <p className="text-sm text-slate-700">
+            Found a likely Decathlon category for {suggestions.size} unmapped product type{suggestions.size === 1 ? "" : "s"}.
+          </p>
+          <Button variant="primary" loading={applying} onClick={() => applySuggestions()}>
+            Map all {suggestions.size} suggested
+          </Button>
+        </div>
+      ) : null}
+      {rules.length > 0 ? (
+        <div className="mt-3 flex justify-end">
+          <Button loading={applying} onClick={fillAttributeSuggestions}>
+            Fill suggested size charts &amp; attributes
+          </Button>
+        </div>
+      ) : null}
+      {applyResult ? <div className="mt-3"><Banner tone="success">{applyResult}</Banner></div> : null}
       {error ? <div className="mt-3"><Banner tone="critical">{error}</Banner></div> : null}
 
       {types === null ? (
@@ -487,6 +745,21 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
                     {rule ? <Button onClick={() => clear(t.productType)}>Clear</Button> : null}
                   </div>
                 </div>
+                {!rule && suggestions.get(t.productType) ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span>
+                      Suggested: <span className="font-medium text-slate-700">{suggestions.get(t.productType)!.path}</span>{" "}
+                      <span className="font-mono text-slate-400">{suggestions.get(t.productType)!.code}</span>
+                    </span>
+                    <button
+                      className="font-medium text-brand-600 hover:underline disabled:opacity-50"
+                      disabled={applying}
+                      onClick={() => applySuggestions([t.productType])}
+                    >
+                      Use this
+                    </button>
+                  </div>
+                ) : null}
                 {rule && !rule.problem ? (
                   <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Select
@@ -518,6 +791,7 @@ function CategorySection({ onChange, refreshKey }: { onChange: () => void; refre
                     onCancel={() => setEditingChart(null)}
                   />
                 ) : null}
+                {rule && !rule.problem ? <TypeAttributes productType={t.productType} refreshKey={refreshKey} onChange={onChange} /> : null}
                 {rule?.problem ? (
                   <p className="mt-2 text-xs text-red-600">
                     {rule.problem} Products of this type won&rsquo;t import until you pick a specific category.

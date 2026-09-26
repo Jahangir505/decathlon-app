@@ -71,6 +71,10 @@ model CategoryMapping {
   /// size of this type is matched to the chart's code automatically; explicit size mappings win.
   sizeChart              String?
   sizeChartLabel         String?
+  /// Values for the category's other required attributes that Shopify has no field for (sport,
+  /// condition, product nature, ...): { [attributeCode]: { code, label } }. Used when neither the
+  /// product's "Decathlon Attributes" metafield nor its option values supply one.
+  attributeDefaults      Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 

@@ -7,3 +7,4 @@ export * from "./pricing";
 export * from "./matching";
 export * from "./adapters/shopify.adapter";
 export * from "./adapters/decathlon.adapter";
+export * from "./category-suggest";

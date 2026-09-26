@@ -18,6 +18,10 @@ import {
   matchSizeInChart,
   optionRoleNames,
   parseSizeEntry,
+  attributeDefaultCodes,
+  bestLabelMatch,
+  suggestCategory,
+  type CategorySuggestion,
   type ProductReadiness,
 } from "@shopify-decathlon/sync";
 import { createLogger } from "@shopify-decathlon/logger";
@@ -94,6 +98,37 @@ const AUTOMATIC_ATTRIBUTE_CODES = new Set([
   "brandName",
   "GPSR_MANUFACTURER_EMAIL_ADDRESS",
 ]);
+
+/** One of a product type's required attributes that Shopify can't supply, with its chosen value. */
+export interface TypeAttributeNeed {
+  code: string;
+  label: string;
+  type: string;
+  valuesList: string | null;
+  current: { code: string; label: string } | null;
+  suggestion: { code: string; label: string } | null;
+}
+
+type StoredDefaults = Record<string, { code: string; label: string }>;
+
+function storedDefaults(raw: unknown): StoredDefaults {
+  const out: StoredDefaults = {};
+  for (const [attr, code] of Object.entries(attributeDefaultCodes(raw))) {
+    const label = (raw as Record<string, { label?: unknown }>)[attr]?.label;
+    out[attr] = { code, label: typeof label === "string" ? label : code };
+  }
+  return out;
+}
+
+/** "MEN'S" / "Men" / "mens" -> "men"; compares gender labels across Decathlon's differing lists. */
+function genderWord(label: string): string {
+  return label.toLowerCase().replace(/[^a-z]/g, "").replace(/s$/, "");
+}
+
+/** Title/description attributes the import fills from the product's own text. */
+function isGeneratedText(code: string): boolean {
+  return code === "mainTitle" || /^(productTitle|webcatchline|longDescription)-/.test(code);
+}
 
 @Injectable()
 export class MappingsService {
@@ -256,6 +291,280 @@ export class MappingsService {
     return [...counts.entries()]
       .map(([productType, productCount]) => ({ productType, productCount }))
       .sort((a, b) => b.productCount - a.productCount);
+  }
+
+  /**
+   * A best-guess Decathlon category for every product type that has no rule yet, matched by name
+   * (see suggestCategory). Types already mapped steer the guesses toward the same branch of H11.
+   */
+  async categorySuggestions(shopId: string): Promise<Array<{ productType: string; suggestion: CategorySuggestion | null }>> {
+    const [types, rules, hierarchies] = await Promise.all([
+      this.shopifyProductTypes(shopId),
+      this.repositories.categoryMappings.list(shopId),
+      this.catalogFor(shopId).then((c) => c.hierarchies(shopId)),
+    ]);
+    const mapped = new Set(rules.map((r) => r.shopifyProductType));
+    const preferred = rules.map((r) => r.decathlonCategoryCode);
+    return types
+      .filter((t) => !mapped.has(t.productType.trim().toLowerCase()))
+      .map((t) => ({ productType: t.productType, suggestion: suggestCategory(t.productType, hierarchies, preferred) }));
+  }
+
+  /** "Map all": saves the suggestion for each unmapped type (or only those listed). Types with no
+   *  suggestion are left for the merchant to map by hand. When every existing rule that has a
+   *  gender uses the same one (a men's-only shop, say), new rules get it too. */
+  async applyCategorySuggestions(shopId: string, only?: string[]): Promise<{ saved: number; unmatched: string[] }> {
+    const wanted = only?.length ? new Set(only.map((t) => t.trim().toLowerCase())) : null;
+    const withGender = (await this.repositories.categoryMappings.list(shopId)).filter((r) => r.gender);
+    const shopGender = new Set(withGender.map((r) => r.gender)).size === 1 ? withGender[0] : null;
+    let saved = 0;
+    const unmatched: string[] = [];
+    for (const { productType, suggestion } of await this.categorySuggestions(shopId)) {
+      if (wanted && !wanted.has(productType.trim().toLowerCase())) continue;
+      if (!suggestion) {
+        unmatched.push(productType);
+        continue;
+      }
+      await this.repositories.categoryMappings.upsert(shopId, productType, suggestion.code, suggestion.label);
+      if (shopGender) {
+        await this.repositories.categoryMappings.updateDetails(shopId, productType, {
+          gender: shopGender.gender,
+          genderLabel: shopGender.genderLabel,
+        });
+      }
+      saved += 1;
+    }
+    // New rules still need their category's other attributes; fill whatever can be suggested.
+    if (saved > 0) await this.fillTypeAttributeSuggestions(shopId).catch(() => undefined);
+    return { saved, unmatched };
+  }
+
+  // ── Per-type attribute defaults ─────────────────────────────────────────────────────────────
+
+  /**
+   * The category's required, product-level attributes the import can't fill from Shopify data:
+   * not automatic (EAN, brand, ...), not gender (its own control), not per-variant (those come from
+   * option values: colour, sizes).
+   */
+  private needsFor(attributes: DecathlonAttribute[], hierarchies: Awaited<ReturnType<CatalogCache["hierarchies"]>>, categoryCode: string) {
+    return requiredAttributesForCategory(attributes, categoryCode, ancestorCodesFor(hierarchies, categoryCode)).filter(
+      (a) => !AUTOMATIC_ATTRIBUTE_CODES.has(a.code) && a.code !== GENDER_ATTRIBUTE_CODE && !a.variant && !isGeneratedText(a.code),
+    );
+  }
+
+  /**
+   * A likely value, in order: what the shop chose for the same attribute on its other types (when
+   * they all agree — the sport of a one-sport shop), "New" for a condition, and for a product-nature
+   * list the entry named like the product type or its category.
+   */
+  private suggestValue(
+    attr: DecathlonAttribute,
+    productType: string,
+    categoryLabel: string | null,
+    entries: Array<{ code: string; label: string }>,
+    chosenElsewhere: Array<{ code: string; label: string }>,
+    genderLabel: string | null = null,
+  ): { code: string; label: string } | null {
+    const agreed = [...new Set(chosenElsewhere.map((c) => c.code))];
+    if (agreed.length === 1) return chosenElsewhere[0]!;
+    if (!attr.type.startsWith("LIST") || entries.length === 0) return null;
+    if (/condition|state/i.test(attr.label)) {
+      const fresh = entries.find((e) => /^new\b/i.test(e.label.trim()));
+      if (fresh) return { code: fresh.code, label: fresh.label };
+    }
+    if (/gender/i.test(attr.code) || /gender/i.test(attr.label)) {
+      const g = genderLabel ? genderWord(genderLabel) : null;
+      const hit = g ? entries.find((e) => genderWord(e.label) === g) : undefined;
+      if (hit) return { code: hit.code, label: hit.label };
+    }
+    if (/^SPORT/i.test(attr.code)) {
+      // No Shopify data says which sport; a fashion catalogue is lifestyle/casual wear.
+      for (const re of [/lifestyle/i, /urban|city|street/i, /casual|leisure|everyday/i]) {
+        const hit = entries.find((e) => re.test(e.label));
+        if (hit) return { code: hit.code, label: hit.label };
+      }
+    }
+    if (/^PRODUCT_TYPE_/i.test(attr.code) || /nature/i.test(attr.label)) {
+      const hit = bestLabelMatch(productType, entries) ?? (categoryLabel ? bestLabelMatch(categoryLabel, entries) : undefined);
+      if (hit) return { code: hit.code, label: hit.label };
+    }
+    return null;
+  }
+
+  async typeAttributes(shopId: string, productType: string): Promise<TypeAttributeNeed[]> {
+    const rule = await this.repositories.categoryMappings.findByProductType(shopId, productType);
+    if (!rule) return [];
+    const catalog = await this.catalogFor(shopId);
+    const [attributes, hierarchies, rules] = await Promise.all([
+      catalog.attributes(shopId),
+      catalog.hierarchies(shopId),
+      this.repositories.categoryMappings.list(shopId),
+    ]);
+    const current = storedDefaults(rule.attributeDefaults);
+    const out: TypeAttributeNeed[] = [];
+    for (const attr of this.needsFor(attributes, hierarchies, rule.decathlonCategoryCode)) {
+      const entries = attr.valuesList ? await catalog.valueList(shopId, attr.valuesList) : [];
+      const elsewhere = rules
+        .filter((r) => r.id !== rule.id)
+        .map((r) => storedDefaults(r.attributeDefaults)[attr.code])
+        .filter((v): v is { code: string; label: string } => Boolean(v));
+      out.push({
+        code: attr.code,
+        label: attr.label,
+        type: attr.type,
+        valuesList: attr.valuesList ?? null,
+        current: current[attr.code] ?? null,
+        suggestion: current[attr.code]
+          ? null
+          : this.suggestValue(attr, productType, rule.decathlonCategoryLabel, entries, elsewhere, rule.genderLabel),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Sets (or, with value null, clears) one attribute's value for a product type. `applyToAll` also
+   * gives it to every other mapped type whose category requires the attribute and has no value yet.
+   */
+  async saveTypeAttribute(
+    shopId: string,
+    productType: string,
+    attributeCode: string,
+    value: { code: string; label?: string } | null,
+    applyToAll = false,
+  ): Promise<{ updated: number }> {
+    const rule = await this.repositories.categoryMappings.findByProductType(shopId, productType);
+    if (!rule) throw new BadRequestException(`Set a Decathlon category for "${productType}" first`);
+    const catalog = await this.catalogFor(shopId);
+    const [attributes, hierarchies] = await Promise.all([catalog.attributes(shopId), catalog.hierarchies(shopId)]);
+    const attr = attributes.find((a) => a.code === attributeCode);
+    if (!attr) throw new BadRequestException(`"${attributeCode}" isn't a Decathlon attribute`);
+
+    let stored: { code: string; label: string } | null = null;
+    if (value && String(value.code ?? "").trim()) {
+      const raw = String(value.code).trim();
+      if (attr.type.startsWith("LIST") && attr.valuesList) {
+        const entries = await catalog.valueList(shopId, attr.valuesList);
+        const hit = entries.find((e) => e.code === raw);
+        if (!hit) throw new BadRequestException(`"${raw}" isn't one of Decathlon's values for ${attr.label}`);
+        stored = { code: hit.code, label: hit.label };
+      } else {
+        stored = { code: raw, label: raw };
+      }
+    }
+
+    const write = async (r: { shopifyProductType: string; attributeDefaults: unknown }) => {
+      const next = storedDefaults(r.attributeDefaults);
+      if (stored) next[attributeCode] = stored;
+      else delete next[attributeCode];
+      await this.repositories.categoryMappings.updateDetails(shopId, r.shopifyProductType, { attributeDefaults: next });
+    };
+    await write(rule);
+    let updated = 1;
+    if (applyToAll && stored) {
+      for (const other of await this.repositories.categoryMappings.list(shopId)) {
+        if (other.id === rule.id || storedDefaults(other.attributeDefaults)[attributeCode]) continue;
+        if (!this.needsFor(attributes, hierarchies, other.decathlonCategoryCode).some((a) => a.code === attributeCode)) continue;
+        await write(other);
+        updated += 1;
+      }
+    }
+    return { updated };
+  }
+
+  /**
+   * The size chart that fits a product type's real Shopify sizes best: charts from Decathlon's size
+   * lists (including the category's own size list), scored by how many of the type's sizes they
+   * contain, then by matching the type's gender (MEN'S -> a men's chart) and garment (top/bottom).
+   */
+  private suggestSizeChart(
+    sizes: string[],
+    entries: Array<{ listCode: string; code: string; label: string }>,
+    ownLists: string[],
+    genderLabel: string | null,
+    sizeAttrCodes: string[],
+  ): { code: string; name: string } | null {
+    if (sizes.length === 0) return null;
+    const charts = new Map<string, { name: string; own: boolean }>();
+    for (const e of entries) {
+      const { chart, chartName } = parseSizeEntry(e);
+      if (!chartName) continue;
+      const c = charts.get(chart) ?? { name: chartName, own: false };
+      if (ownLists.includes(e.listCode)) c.own = true;
+      charts.set(chart, c);
+    }
+    const g = genderLabel ? genderWord(genderLabel) : null;
+    const garment = sizeAttrCodes.join(" ").toUpperCase();
+    let best: { code: string; name: string; score: number } | null = null;
+    for (const [code, c] of charts) {
+      const hits = sizes.filter((sz) => matchSizeInChart(entries, code, sz)).length;
+      if (hits === 0) continue;
+      const name = c.name.toUpperCase();
+      let score = hits * 10 + (c.own ? 5 : 0);
+      if (g === "men" && /\bMEN/.test(name) && !/WOMEN/.test(name)) score += 4;
+      if (g === "women" && /WOMEN/.test(name)) score += 4;
+      if (g && g !== "men" && g !== "women" && new RegExp(g.toUpperCase()).test(name)) score += 4;
+      if (/TOP/.test(garment) && /TOP/.test(name)) score += 3;
+      if (/BOTTOM/.test(garment) && /BOTTOM|TROUSER|PANT/.test(name)) score += 3;
+      if (!best || score > best.score) best = { code, name: c.name, score };
+    }
+    return best ? { code: best.code, name: best.name } : null;
+  }
+
+  /** Saves every suggested attribute value and size chart not set yet, for the listed types
+   *  (default: all). */
+  async fillTypeAttributeSuggestions(
+    shopId: string,
+    productTypes?: string[],
+  ): Promise<{ filled: number; sizeCharts: number; stillMissing: number }> {
+    const wanted = productTypes?.length ? new Set(productTypes.map((t) => t.trim().toLowerCase())) : null;
+    let filled = 0;
+    let sizeChartsSet = 0;
+    let stillMissing = 0;
+    const rules = (await this.repositories.categoryMappings.list(shopId)).filter((r) => !wanted || wanted.has(r.shopifyProductType));
+
+    // Size charts first — they need the shop's real sizes per type.
+    const withoutChart = rules.filter((r) => !r.sizeChart);
+    if (withoutChart.length > 0) {
+      const config = await this.repositories.syncConfigurations.getOrCreateDefault(shopId);
+      const sizeNames = optionRoleNames(config).sizeOptionNames;
+      const sizesByType = new Map<string, Set<string>>();
+      for (const p of await this.activeProducts(shopId)) {
+        const type = effectiveProductType(p).toLowerCase();
+        if (!type) continue;
+        const set = sizesByType.get(type) ?? new Set<string>();
+        for (const o of p.options) if (sizeNames.includes(o.name.trim().toLowerCase())) o.values.forEach((v) => v.trim() && set.add(v.trim()));
+        sizesByType.set(type, set);
+      }
+      const catalog = await this.catalogFor(shopId);
+      const [attributes, hierarchies] = await Promise.all([catalog.attributes(shopId), catalog.hierarchies(shopId)]);
+      for (const rule of withoutChart) {
+        const sizeAttrs = requiredAttributesForCategory(attributes, rule.decathlonCategoryCode, ancestorCodesFor(hierarchies, rule.decathlonCategoryCode)).filter(
+          (a) => a.variant && a.valuesList && /size/i.test(a.code),
+        );
+        const ownLists = sizeAttrs.map((a) => a.valuesList!);
+        const listCodes = [...new Set([...SIZE_VALUE_LISTS, ...ownLists])];
+        const entries = (await Promise.all(listCodes.map((c) => catalog.valueList(shopId, c)))).flat();
+        const chart = this.suggestSizeChart([...(sizesByType.get(rule.shopifyProductType) ?? [])], entries, ownLists, rule.genderLabel, sizeAttrs.map((a) => a.code));
+        if (chart) {
+          await this.repositories.categoryMappings.updateDetails(shopId, rule.shopifyProductType, { sizeChart: chart.code, sizeChartLabel: chart.name });
+          sizeChartsSet += 1;
+        }
+      }
+    }
+
+    for (const rule of rules) {
+      for (const need of await this.typeAttributes(shopId, rule.shopifyProductType)) {
+        if (need.current) continue;
+        if (need.suggestion) {
+          await this.saveTypeAttribute(shopId, rule.shopifyProductType, need.code, need.suggestion);
+          filled += 1;
+        } else {
+          stillMissing += 1;
+        }
+      }
+    }
+    return { filled, sizeCharts: sizeChartsSet, stillMissing };
   }
 
   /** Active products with neither a product type nor a Shopify standard category — nothing a

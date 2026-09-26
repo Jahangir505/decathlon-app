@@ -154,10 +154,12 @@ export function Modal({
   title,
   onClose,
   children,
+  size = "md",
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  size?: "md" | "lg";
 }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -170,7 +172,7 @@ export function Modal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-slate-900/40" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+      <div className={`relative z-10 w-full ${size === "lg" ? "max-w-3xl" : "max-w-lg"} rounded-xl bg-white p-6 shadow-xl`}>
         <div className="mb-4 flex items-start justify-between gap-4">
           <h3 className="text-base font-semibold text-slate-900">{title}</h3>
           <button

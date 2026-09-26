@@ -1,4 +1,4 @@
-import type { AttributeValueMapping, CategoryMapping, PrismaClient } from "@prisma/client";
+import { Prisma, type AttributeValueMapping, type CategoryMapping, type PrismaClient } from "@prisma/client";
 import { attributeValueKey } from "@shopify-decathlon/shared";
 
 /** Shopify product types are free text and merchants are inconsistent about case/padding, so both
@@ -38,11 +38,17 @@ export class CategoryMappingRepository {
     await this.prisma.categoryMapping.deleteMany({ where: { shopId, shopifyProductType: normalizeKey(shopifyProductType) } });
   }
 
-  /** Gender / size chart for a product type. The type needs a category rule first. `null` clears. */
+  /** Gender / size chart / attribute defaults for a product type. The type needs a category rule first. `null` clears. */
   updateDetails(
     shopId: string,
     shopifyProductType: string,
-    data: { gender?: string | null; genderLabel?: string | null; sizeChart?: string | null; sizeChartLabel?: string | null },
+    data: {
+      gender?: string | null;
+      genderLabel?: string | null;
+      sizeChart?: string | null;
+      sizeChartLabel?: string | null;
+      attributeDefaults?: Prisma.InputJsonValue | typeof Prisma.DbNull;
+    },
   ): Promise<CategoryMapping> {
     return this.prisma.categoryMapping.update({
       where: { shopId_shopifyProductType: { shopId, shopifyProductType: normalizeKey(shopifyProductType) } },

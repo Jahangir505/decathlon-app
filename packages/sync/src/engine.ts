@@ -76,6 +76,17 @@ export interface ProductUnchanged {
 
 export type ProductSyncResult = ImportSubmission | ProductUnchanged | null;
 
+/** CategoryMapping.attributeDefaults ({ code: { code, label } }) -> { code: valueCode }. */
+export function attributeDefaultCodes(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [attr, v] of Object.entries(raw as Record<string, unknown>)) {
+    const code = v && typeof v === "object" ? (v as { code?: unknown }).code : v;
+    if (typeof code === "string" && code) out[attr] = code;
+  }
+  return out;
+}
+
 /** Why a category code can't hold products, or undefined when it can. Exported for the Mappings API. */
 export function categoryError(hierarchies: Array<{ code: string; label: string; parentCode: string }>, code: string): string | undefined {
   const node = hierarchies.find((h) => h.code === code);
@@ -394,7 +405,12 @@ export class SyncEngine {
           ...optionRoleNames(config),
           valueMappings,
           typeRule: typeRule
-            ? { productType: product.productType ?? typeRule.shopifyProductType, gender: typeRule.gender, sizeChart: typeRule.sizeChart }
+            ? {
+                productType: product.productType ?? typeRule.shopifyProductType,
+                gender: typeRule.gender,
+                sizeChart: typeRule.sizeChart,
+                attributeDefaults: attributeDefaultCodes(typeRule.attributeDefaults),
+              }
             : undefined,
         },
       );

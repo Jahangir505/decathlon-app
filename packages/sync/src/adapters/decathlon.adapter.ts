@@ -34,8 +34,9 @@ export interface ProductImportContext {
   /** Shopify option names that hold colour / size (case-insensitive). See optionRoleNames. */
   colorOptionNames?: string[];
   sizeOptionNames?: string[];
-  /** The product type's rule from the Mappings page: default gender and size chart. */
-  typeRule?: { productType: string; gender?: string | null; sizeChart?: string | null };
+  /** The product type's rule from the Mappings page: default gender, size chart, and values for
+   *  other required attributes (attribute code -> Decathlon value code). */
+  typeRule?: { productType: string; gender?: string | null; sizeChart?: string | null; attributeDefaults?: Record<string, string> };
 }
 
 /** Decathlon's size vocabulary (see SIZE_VALUE_LISTS in docs): the retired t-shirt and shoe lists,
@@ -90,6 +91,35 @@ export function matchSizeInChart(entries: DecathlonValueListEntry[], chart: stri
     if (hit) return hit;
   }
   return undefined;
+}
+
+const ONE_SIZE_LABELS = new Set(["one size", "onesize", "single size", "unique size", "unique", "no size", "tu", "taille unique", "os", "u", "1 size"]);
+
+/**
+ * A Shopify size in one of Decathlon's size LISTS (as opposed to the SIZE column): through the
+ * type's size chart when it has one, else only when exactly one list entry has that size — "S"
+ * exists in men's and women's charts alike, and guessing between them would send the wrong one.
+ */
+export function matchSizeInList(
+  entries: DecathlonValueListEntry[],
+  listCode: string,
+  size: string | undefined,
+  chart: string | null | undefined,
+): string | undefined {
+  const list = entries.filter((e) => e.listCode === listCode);
+  // No Size option (a bag, a wallet): the list's one-size value, if it has one.
+  if (!size) {
+    const one = list.find((e) => ONE_SIZE_LABELS.has(parseSizeEntry(e).value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()));
+    return one?.code;
+  }
+  if (chart) {
+    const hit = matchSizeInChart(list, chart, size);
+    if (hit) return hit.code;
+  }
+  const v = size.trim().toLowerCase();
+  const same = list.filter((e) => e.label.trim().toLowerCase() === v || parseSizeEntry(e).value.toLowerCase() === v);
+  const codes = [...new Set(same.map((e) => e.code))];
+  return codes.length === 1 ? codes[0] : undefined;
 }
 
 /** Decathlon attribute a variant's Shopify size is sent as. Its value list for most categories
@@ -304,19 +334,40 @@ export function buildProductImportPayload(
                   .map((v) => resolveAttributeValue(attr, v, context.valueLists, context.valueMappings))
                   .find((v): v is string => v !== undefined)
               : undefined;
+          // A size list attribute (e.g. SIZES_APPAREL_TOP): "S" rarely equals a list label such as
+          // "S (Z349: SIZE MEN TOP)" and is too short for the loose match, so read it through the
+          // type's size chart, as the SIZE column does.
+          const fromSizeList =
+            fromOptions === undefined && attr.variant && attr.valuesList && /size/i.test(attr.code)
+              ? matchSizeInList(context.valueLists, attr.valuesList, optionValueFor(variant, context.sizeOptionNames), context.typeRule?.sizeChart)
+              : undefined;
+          const typeDefault = attr.variant ? undefined : context.typeRule?.attributeDefaults?.[attr.code];
           if (fromOptions !== undefined) {
             row[attr.code] = fromOptions;
+          } else if (fromSizeList !== undefined) {
+            row[attr.code] = fromSizeList;
+          } else if (typeDefault) {
+            row[attr.code] = typeDefault;
           } else {
             const where = `set it on the product's "Decathlon Attributes" metafield, e.g. {"${attr.code}": "${
               attr.type === "LIST" ? `<one of Decathlon's "${attr.valuesList}" values>` : "..."
             }"}`;
-            const variantNote =
-              attr.code === "color"
-                ? ` (or add a "${context.colorOptionNames?.[0] ?? "Color"}" option to the product, and map its values on the Mappings page)`
-                : attr.variant
-                  ? " (also matched against each variant's Shopify option values)"
-                  : "";
-            missing.push(`${attr.label} (${attr.code}) — ${where}${variantNote}`);
+            const typeName = context.typeRule?.productType ?? product.productType;
+            if (attr.variant && /size/i.test(attr.code)) {
+              const size = optionValueFor(variant, context.sizeOptionNames);
+              missing.push(
+                `${attr.label} (${attr.code}) — ` +
+                  (size
+                    ? `size "${size}" couldn't be matched: choose a Size chart for product type "${typeName ?? "(none)"}" on the Mappings page`
+                    : `the product has no "${context.sizeOptionNames?.[0] ?? "Size"}" option and Decathlon's list has no one-size value — set it on the product's "Decathlon Attributes" metafield`),
+              );
+            } else if (attr.code === "color") {
+              missing.push(`${attr.label} (${attr.code}) — ${where} (or add a "${context.colorOptionNames?.[0] ?? "Color"}" option to the product, and map its values on the Mappings page)`);
+            } else if (!attr.variant && typeName) {
+              missing.push(`${attr.label} (${attr.code}) — choose it for product type "${typeName}" on the Mappings page`);
+            } else {
+              missing.push(`${attr.label} (${attr.code}) — ${where}${attr.variant ? " (also matched against each variant's Shopify option values)" : ""}`);
+            }
           }
         }
       }

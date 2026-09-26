@@ -161,3 +161,68 @@ describe("metafield overrides", () => {
     expect(row.SPORT_ALL).toBe("296");
   });
 });
+
+describe("product-type attribute defaults and size lists", () => {
+  // The four attributes 128500 demanded live (2026-09-24), shaped as PM11 returns them.
+  const EXTRA: DecathlonAttribute[] = [
+    ...ATTRIBUTES,
+    attr("CHARACTERISTIC_748", { type: "LIST", valuesList: "values-748", label: "condition", hierarchyCode: "128500" }),
+    attr("SPORT_ALL", { type: "LIST_MULTIPLE_VALUES", valuesList: "sports", label: "All sports", hierarchyCode: "100000" }),
+    attr("PRODUCT_TYPE_128500", { type: "LIST", valuesList: "cpn_128500", label: "Product Nature - T-shirts", hierarchyCode: "128500" }),
+    attr("SIZES_APPAREL_TOP", { type: "LIST", valuesList: "size_cpn_1122", label: "Sizes for Apparel Top", variant: true, hierarchyCode: "128500" }),
+  ];
+  const LISTS: DecathlonValueListEntry[] = [
+    ...VALUES,
+    { listCode: "size_cpn_1122", code: "Z349_S", label: "S (Z349: SIZE MEN TOP)" },
+    { listCode: "size_cpn_1122", code: "Z350_S", label: "S (Z350: SIZE WOMEN TOP)" },
+    { listCode: "size_cpn_1122", code: "Z349_XXL", label: "2XL (Z349: SIZE MEN TOP)" },
+  ];
+  const DEFAULTS = { CHARACTERISTIC_748: "NEW", SPORT_ALL: "HIKING", PRODUCT_TYPE_128500: "TSHIRT" };
+  const ctx = (typeRule: ProductImportContext["typeRule"]) => context({ attributes: EXTRA, valueLists: LISTS, typeRule });
+
+  it("fills product-level attributes from the type's defaults", () => {
+    const row = build(product(), variant({ Color: "Black", Size: "S" }), ctx({ productType: "T-Shirts", sizeChart: "Z349", attributeDefaults: DEFAULTS }));
+    expect(row).toMatchObject({ CHARACTERISTIC_748: "NEW", SPORT_ALL: "HIKING", PRODUCT_TYPE_128500: "TSHIRT" });
+  });
+
+  it("matches the variant size in the size list through the type's chart", () => {
+    const row = (size: string) =>
+      build(product(), variant({ Color: "Black", Size: size }), ctx({ productType: "T-Shirts", sizeChart: "Z349", attributeDefaults: DEFAULTS }));
+    expect(row("S").SIZES_APPAREL_TOP).toBe("Z349_S");
+    expect(row("XXL").SIZES_APPAREL_TOP).toBe("Z349_XXL");
+  });
+
+  it("without a chart, refuses to guess between men's and women's S and says to pick a chart", () => {
+    expect(() =>
+      build(product(), variant({ Color: "Black", Size: "S" }), ctx({ productType: "T-Shirts", attributeDefaults: DEFAULTS })),
+    ).toThrow(/size "S" couldn't be matched: choose a Size chart for product type "T-Shirts"/);
+  });
+
+  it("points a missing product-level attribute at the product type, not a metafield", () => {
+    expect(() => build(product(), variant({ Color: "Black", Size: "S" }), ctx({ productType: "T-Shirts", sizeChart: "Z349" }))).toThrow(
+      /All sports \(SPORT_ALL\) — choose it for product type "T-Shirts" on the Mappings page/,
+    );
+  });
+
+  it("lets the product's own metafield win over the type default", () => {
+    const row = build(
+      product({ attributes: { SPORT_ALL: "RUNNING" } }),
+      variant({ Color: "Black", Size: "S" }),
+      context({
+        attributes: EXTRA,
+        valueLists: [...LISTS, { listCode: "sports", code: "RUNNING", label: "Running" }],
+        typeRule: { productType: "T-Shirts", sizeChart: "Z349", attributeDefaults: DEFAULTS },
+      }),
+    );
+    expect(row.SPORT_ALL).toBe("RUNNING");
+  });
+});
+
+describe("one-size products", () => {
+  it("uses the list's one-size value when the product has no Size option", () => {
+    const attrs = [...ATTRIBUTES, attr("SIZE_CPN_2", { type: "LIST", valuesList: "size_cpn_2", variant: true, hierarchyCode: "128500" })];
+    const lists = [...VALUES, { listCode: "size_cpn_2", code: "Z1_S", label: "S (Z1: BAG)" }, { listCode: "size_cpn_2", code: "Z1_U", label: "One Size (Z1: BAG)" }];
+    const row = build(product(), variant({ Color: "Black" }), context({ attributes: attrs, valueLists: lists }));
+    expect(row.SIZE_CPN_2).toBe("Z1_U");
+  });
+});
