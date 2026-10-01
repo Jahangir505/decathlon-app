@@ -75,9 +75,7 @@ describe("syncProduct — only active products are imported", () => {
     expect(await t.run()).toBeNull();
     expect(t.decathlon.importProducts).not.toHaveBeenCalled();
     expect(t.repositories.categoryMappings.findByProductType).not.toHaveBeenCalled();
-    expect(t.logs).toEqual([
-      expect.objectContaining({ type: "PRODUCT_SYNC", status: "SKIPPED", errorMessage: expect.stringContaining(`is ${status.toLowerCase()} in Shopify`) }),
-    ]);
+    expect(t.logs).toEqual([]);
     expect(t.jobs).toEqual([["job1", "SKIPPED", expect.stringContaining("only active products")]]);
   });
 
@@ -85,8 +83,8 @@ describe("syncProduct — only active products are imported", () => {
     const t = setup("ACTIVE");
     await t.run();
     expect(t.repositories.categoryMappings.findByProductType).toHaveBeenCalled();
-    expect(t.logs[0]).toMatchObject({ status: "SKIPPED", errorMessage: expect.stringContaining("no Decathlon category") });
-    expect(t.jobs).toEqual([["job1", "SKIPPED", expect.stringContaining("Not ready for Decathlon")]]);
+    expect(t.logs).toEqual([]);
+    expect(t.jobs).toEqual([["job1", "SKIPPED", expect.stringContaining("no Decathlon category")]]);
   });
 });
 

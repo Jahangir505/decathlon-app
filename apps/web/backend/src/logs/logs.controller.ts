@@ -10,10 +10,10 @@ export class LogsController {
 
   @Get()
   async list(@Req() req: AuthenticatedRequest, @Query("skip") skip?: string, @Query("take") take?: string) {
-    const opts = { skip: skip ? Number(skip) : undefined, take: take ? Number(take) : undefined };
+    const opts = { skip: skip ? Number(skip) : undefined, take: take ? Number(take) : undefined, hideSkipped: true };
     const [items, total] = await Promise.all([
       this.repositories.syncLogs.list(req.shopId, opts),
-      this.repositories.syncLogs.count(req.shopId),
+      this.repositories.syncLogs.count(req.shopId, { hideSkipped: true }),
     ]);
     return { items, total };
   }

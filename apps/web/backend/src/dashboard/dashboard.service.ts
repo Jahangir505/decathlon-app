@@ -12,7 +12,7 @@ export class DashboardService {
       this.repositories.productMappings.countByStatus(shopId),
       this.repositories.orderMappings.count(shopId),
       this.repositories.orderMappings.list(shopId, { take: 5 }),
-      this.repositories.syncJobs.list(shopId, { take: 5 }),
+      this.repositories.syncJobs.list(shopId, { take: 5, hideSkipped: true }),
     ]);
 
     const productCounts = Object.fromEntries(productStatusCounts.map((row) => [row.status, row._count._all]));

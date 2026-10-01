@@ -46,21 +46,25 @@ export class SyncLogRepository {
 
   list(
     shopId: string,
-    opts: { type?: SyncJobType; status?: SyncStatus; skip?: number; take?: number } = {},
+    opts: { type?: SyncJobType; status?: SyncStatus; hideSkipped?: boolean; skip?: number; take?: number } = {},
   ): Promise<SyncLog[]> {
     return this.prisma.syncLog.findMany({
-      where: { shopId, type: opts.type, status: opts.status },
+      where: { shopId, type: opts.type, status: statusFilter(opts) },
       orderBy: { createdAt: "desc" },
       skip: opts.skip,
       take: opts.take ?? 50,
     });
   }
 
-  count(shopId: string, opts: { type?: SyncJobType; status?: SyncStatus } = {}): Promise<number> {
-    return this.prisma.syncLog.count({ where: { shopId, type: opts.type, status: opts.status } });
+  count(shopId: string, opts: { type?: SyncJobType; status?: SyncStatus; hideSkipped?: boolean } = {}): Promise<number> {
+    return this.prisma.syncLog.count({ where: { shopId, type: opts.type, status: statusFilter(opts) } });
   }
 
   findByCorrelationId(shopId: string, correlationId: string): Promise<SyncLog[]> {
     return this.prisma.syncLog.findMany({ where: { shopId, correlationId } });
   }
+}
+
+function statusFilter(opts: { status?: SyncStatus; hideSkipped?: boolean }): SyncStatus | { not: SyncStatus } | undefined {
+  return opts.status ?? (opts.hideSkipped ? { not: "SKIPPED" } : undefined);
 }

@@ -46,11 +46,15 @@ export class SyncJobRepository {
     return this.prisma.syncJob.findFirst({ where: { id, shopId } });
   }
 
-  list(shopId: string, opts: { type?: SyncJobType; status?: SyncStatus; take?: number } = {}): Promise<SyncJob[]> {
+  list(shopId: string, opts: { type?: SyncJobType; status?: SyncStatus; hideSkipped?: boolean; take?: number } = {}): Promise<SyncJob[]> {
     return this.prisma.syncJob.findMany({
-      where: { shopId, type: opts.type, status: opts.status },
+      where: { shopId, type: opts.type, status: statusFilter(opts) },
       orderBy: { createdAt: "desc" },
       take: opts.take ?? 50,
     });
   }
+}
+
+function statusFilter(opts: { status?: SyncStatus; hideSkipped?: boolean }): SyncStatus | { not: SyncStatus } | undefined {
+  return opts.status ?? (opts.hideSkipped ? { not: "SKIPPED" } : undefined);
 }

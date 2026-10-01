@@ -186,17 +186,8 @@ export class SyncEngine {
       throw err; // transport-level failure — let BullMQ's job-level retry apply
     }
 
+    // Skipped products get no Sync Logs row — the log lists only what was actually sent to Decathlon.
     if (prepared.kind === "inactive") {
-      await repositories.syncLogs.write({
-        shopId,
-        syncJobId,
-        type: "PRODUCT_SYNC",
-        status: "SKIPPED",
-        correlationId,
-        itemLabel: prepared.itemLabel,
-        shopifyId: payload.shopifyProductId,
-        errorMessage: prepared.message,
-      });
       await repositories.syncJobs.finish(syncJobId, "SKIPPED", prepared.message);
       return null;
     }
@@ -206,19 +197,9 @@ export class SyncEngine {
     }
     if (prepared.kind === "invalid") {
       // Not ready for Decathlon (missing category, metafield, attribute...): nothing is sent, so
-      // only ready products are imported. Recorded as skipped with the reason rather than failed —
-      // retrying won't fix it without merchant action, and the Mappings readiness check lists it.
+      // only ready products are imported. Skipped rather than failed — retrying won't fix it without
+      // merchant action, and the Mappings readiness check already lists it with the reason.
       const message = `Not ready for Decathlon, not imported: ${prepared.error.message}`;
-      await repositories.syncLogs.write({
-        shopId,
-        syncJobId,
-        type: "PRODUCT_SYNC",
-        status: "SKIPPED",
-        correlationId,
-        itemLabel: prepared.itemLabel,
-        shopifyId: payload.shopifyProductId,
-        errorMessage: message,
-      });
       await repositories.syncJobs.finish(syncJobId, "SKIPPED", message);
       logger.info({ event: "product_sync_not_ready", shopId, productId: payload.shopifyProductId });
       return null;
