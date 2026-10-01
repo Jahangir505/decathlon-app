@@ -106,7 +106,9 @@ export function Products() {
       type: "product",
       multiple: true,
       action: "add",
-      filter: { variants: false, draft: false, archived: false },
+      // hidden: true — an Active product that isn't published to any sales channel (e.g. not on the
+      // Online Store) is still a valid Decathlon listing; without it the picker leaves those out.
+      filter: { hidden: true, variants: false, draft: false, archived: false },
     });
     if (!picked || picked.length === 0) return;
     setAdding(true);
