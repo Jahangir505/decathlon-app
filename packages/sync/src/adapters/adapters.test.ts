@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeDecathlonOrder } from "./decathlon.adapter";
+import { normalizeDecathlonOrder, parseReportText } from "./decathlon.adapter";
 import { buildShopifyOrderInput, normalizeShopifyProduct, parseFulfillmentWebhook, parseRefundWebhook } from "./shopify.adapter";
 import { decathlonOrder, orderLine } from "../test-fixtures";
 
@@ -196,5 +196,28 @@ describe("normalizeShopifyProduct product type", () => {
 
   it("leaves it unset when neither exists", () => {
     expect(normalizeShopifyProduct(raw("", null), "EUR").productType).toBeUndefined();
+  });
+});
+
+describe("parseReportText", () => {
+  it("keeps a row's errors when a quoted field spans several lines (real P44 integration report)", () => {
+    const report = [
+      '"category";"ProductIdentifier";"longDescription-en_GB";"line_number";"errors"',
+      '"114400";"TNF_HAT_Patch_Grey";"Logo Box Beanie',
+      "Features:",
+      "",
+      'Classic fit";"2";"TITLE_KO|TITLE_KO - Automatic validation by MKP Growth Team: Title is incorrect.',
+      "",
+      'Product Title Locale is less than 2 words.|GB"',
+      '"40";"ADI_Eqt_Bag_Silver";"Bag";"3";"FORBIDDEN_TO_SELL|not allowed to sell on Decathlon Website.|GB"',
+      "",
+    ].join("\n");
+
+    const rows = parseReportText(report);
+
+    expect([...rows.keys()]).toEqual(["TNF_HAT_Patch_Grey", "ADI_Eqt_Bag_Silver"]);
+    expect(rows.get("TNF_HAT_Patch_Grey")!.ok).toBe(false);
+    expect(rows.get("TNF_HAT_Patch_Grey")!.error).toMatch(/^TITLE_KO\|.*less than 2 words\.\|GB$/s);
+    expect(rows.get("ADI_Eqt_Bag_Silver")!.error).toMatch(/^FORBIDDEN_TO_SELL/);
   });
 });

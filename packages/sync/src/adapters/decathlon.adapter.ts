@@ -93,7 +93,31 @@ export function matchSizeInChart(entries: DecathlonValueListEntry[], chart: stri
   return undefined;
 }
 
-const ONE_SIZE_LABELS = new Set(["one size", "onesize", "single size", "unique size", "unique", "no size", "tu", "taille unique", "os", "u", "1 size"]);
+type SizeAudience = "woman" | "man" | "child" | "unisex";
+
+function sizeAudience(chartName: string): SizeAudience | undefined {
+  const n = chartName.toLowerCase();
+  if (/unisex|mixed/.test(n)) return "unisex";
+  if (/\b(wom[ae]n|ladies|female|girls?)\b/.test(n)) return "woman";
+  if (/\b(child(ren)?|kids?|junior|baby|infant|boys?)\b/.test(n)) return "child";
+  if (/\b(m[ae]n|male)\b/.test(n)) return "man";
+  return undefined;
+}
+
+/** The chart in `list` for the same wearer as `chartName` (men's top -> MAN TOP MARKETPLACE),
+ *  else the list's unisex chart — the safe choice when the audience can't be told. */
+function equivalentChartInList(list: DecathlonValueListEntry[], chartName: string): string | undefined {
+  const charts = new Map<string, SizeAudience | undefined>();
+  for (const e of list) {
+    const p = parseSizeEntry(e);
+    if (p.chartName && !charts.has(p.chart)) charts.set(p.chart, sizeAudience(p.chartName));
+  }
+  const want = sizeAudience(chartName);
+  const find = (a: SizeAudience) => [...charts].find(([, audience]) => audience === a)?.[0];
+  return (want && find(want)) ?? find("unisex");
+}
+
+const ONE_SIZE_LABELS =new Set(["one size", "onesize", "single size", "unique size", "unique", "no size", "tu", "taille unique", "os", "u", "1 size"]);
 
 /**
  * A Shopify size in one of Decathlon's size LISTS (as opposed to the SIZE column): through the
@@ -115,6 +139,14 @@ export function matchSizeInList(
   if (chart) {
     const hit = matchSizeInChart(list, chart, size);
     if (hit) return hit.code;
+    // The type's chart comes from the retired lists that feed the SIZE column (Z349 SIZE MEN TOP),
+    // but a category's own size list uses the marketplace charts instead — CONFIRMED live 2026-10-01:
+    // size_cpn_1122 (SIZES_APPAREL_TOP) holds only Z1147 MAN TOP / Z1149 WOMAN TOP / Z1151 CHILDREN /
+    // Z1152 UNISEX MARKETPLACE. Read the size through that list's chart for the same audience.
+    const chartName = entries.map(parseSizeEntry).find((p) => p.chart === chart && p.chartName)?.chartName;
+    const twin = chartName ? equivalentChartInList(list, chartName) : undefined;
+    const twinHit = twin ? matchSizeInChart(list, twin, size) : undefined;
+    if (twinHit) return twinHit.code;
   }
   const v = size.trim().toLowerCase();
   const same = list.filter((e) => e.label.trim().toLowerCase() === v || parseSizeEntry(e).value.toLowerCase() === v);
@@ -572,16 +604,23 @@ export interface ParsedReportRow {
  * with real `1004|The category could not be identified` errors produced zero matched rows before this
  * fix). Handles RFC4180-style embedded delimiters/escaped quotes (`""` inside a quoted field) since
  * Decathlon's own values (HTML descriptions, etc.) can contain either.
+ *
+ * CONFIRMED live 2026-10-01 (imports 9800356/9800358): quoted fields also contain raw newlines — the
+ * integration report echoes the multi-line longDescription back verbatim. Splitting the text on
+ * newlines first cut every row into fragments, so the `errors` column (TITLE_KO, FORBIDDEN_TO_SELL)
+ * was never matched to its SKU and the merchant only saw "rejected by Decathlon". Records are
+ * therefore split by the same quote-aware scan as fields.
  */
-function splitCsvLine(line: string, delimiter: string): string[] {
-  const fields: string[] = [];
+function splitCsvRecords(text: string, delimiter: string): string[][] {
+  const records: string[][] = [];
+  let fields: string[] = [];
   let current = "";
   let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
     if (inQuotes) {
       if (ch === '"') {
-        if (line[i + 1] === '"') {
+        if (text[i + 1] === '"') {
           current += '"';
           i++;
         } else {
@@ -595,21 +634,29 @@ function splitCsvLine(line: string, delimiter: string): string[] {
     } else if (ch === delimiter) {
       fields.push(current);
       current = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      fields.push(current);
+      records.push(fields);
+      fields = [];
+      current = "";
     } else {
       current += ch;
     }
   }
   fields.push(current);
-  return fields;
+  records.push(fields);
+  return records.filter((r) => r.some((f) => f.trim().length > 0));
 }
 
 export function parseReportText(text: string): Map<string, ParsedReportRow> {
   const result = new Map<string, ParsedReportRow>();
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length < 2) return result;
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
+  const delimiter = firstLine.includes(";") ? ";" : ",";
+  const records = splitCsvRecords(text, delimiter);
+  if (records.length < 2) return result;
 
-  const delimiter = lines[0]!.includes(";") ? ";" : ",";
-  const header = splitCsvLine(lines[0]!, delimiter).map((h) => h.trim().toLowerCase());
+  const header = records[0]!.map((h) => h.trim().toLowerCase());
   // The integration-stage report has no shop_sku column — it identifies each row by the
   // ProductIdentifier this app submits (which it sets to the variant SKU), so accept either.
   const skuIdx = header.findIndex((h) => h.includes("sku") || h === "productidentifier");
@@ -625,8 +672,8 @@ export function parseReportText(text: string): Map<string, ParsedReportRow> {
   const warningIdx = header.findIndex((h) => h.includes("warning"));
   if (skuIdx === -1) return result; // header not recognized — bail rather than guess column positions
 
-  for (const line of lines.slice(1)) {
-    const cols = splitCsvLine(line, delimiter).map((c) => c.trim());
+  for (const record of records.slice(1)) {
+    const cols = record.map((c) => c.trim());
     const sku = cols[skuIdx];
     if (!sku) continue;
     const status = statusIdx >= 0 ? cols[statusIdx] : undefined;

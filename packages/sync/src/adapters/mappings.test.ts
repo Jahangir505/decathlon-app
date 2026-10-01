@@ -173,9 +173,16 @@ describe("product-type attribute defaults and size lists", () => {
   ];
   const LISTS: DecathlonValueListEntry[] = [
     ...VALUES,
-    { listCode: "size_cpn_1122", code: "Z349_S", label: "S (Z349: SIZE MEN TOP)" },
-    { listCode: "size_cpn_1122", code: "Z350_S", label: "S (Z350: SIZE WOMEN TOP)" },
-    { listCode: "size_cpn_1122", code: "Z349_XXL", label: "2XL (Z349: SIZE MEN TOP)" },
+    // The type's chart lives in the retired SIZE lists...
+    { listCode: "size_cpn_7", code: "Z349_S", label: "S (Z349: SIZE MEN TOP)" },
+    { listCode: "size_cpn_7", code: "Z349_XXL", label: "2XL (Z349: SIZE MEN TOP)" },
+    { listCode: "size_cpn_7", code: "Z350_S", label: "S (Z350: SIZE WOMEN TOP)" },
+    { listCode: "size_cpn_7", code: "Z351_S", label: "S (Z351: SIZE MIXED TOP)" },
+    // ...while the category's own list has only the marketplace charts (live size_cpn_1122, 2026-10-01).
+    { listCode: "size_cpn_1122", code: "Z1147_S", label: "S (Z1147: MAN TOP MARKETPLACE)" },
+    { listCode: "size_cpn_1122", code: "Z1147_2XL", label: "2XL (Z1147: MAN TOP MARKETPLACE)" },
+    { listCode: "size_cpn_1122", code: "Z1149_S", label: "S (Z1149: WOMAN TOP MARKETPLACE)" },
+    { listCode: "size_cpn_1122", code: "Z1152_S", label: "S (Z1152: UNISEX CLOTHES MARKETPLACE)" },
   ];
   const DEFAULTS = { CHARACTERISTIC_748: "NEW", SPORT_ALL: "HIKING", PRODUCT_TYPE_128500: "TSHIRT" };
   const ctx = (typeRule: ProductImportContext["typeRule"]) => context({ attributes: EXTRA, valueLists: LISTS, typeRule });
@@ -188,8 +195,15 @@ describe("product-type attribute defaults and size lists", () => {
   it("matches the variant size in the size list through the type's chart", () => {
     const row = (size: string) =>
       build(product(), variant({ Color: "Black", Size: size }), ctx({ productType: "T-Shirts", sizeChart: "Z349", attributeDefaults: DEFAULTS }));
-    expect(row("S").SIZES_APPAREL_TOP).toBe("Z349_S");
-    expect(row("XXL").SIZES_APPAREL_TOP).toBe("Z349_XXL");
+    expect(row("S").SIZES_APPAREL_TOP).toBe("Z1147_S");
+    expect(row("XXL").SIZES_APPAREL_TOP).toBe("Z1147_2XL");
+  });
+
+  it("maps the chart to the size list's chart for the same wearer, else its unisex chart", () => {
+    const size = (sizeChart: string) =>
+      build(product(), variant({ Color: "Black", Size: "S" }), ctx({ productType: "T-Shirts", sizeChart, attributeDefaults: DEFAULTS })).SIZES_APPAREL_TOP;
+    expect(size("Z350")).toBe("Z1149_S");
+    expect(size("Z351")).toBe("Z1152_S");
   });
 
   it("without a chart, refuses to guess between men's and women's S and says to pick a chart", () => {
