@@ -32,6 +32,11 @@ export class SyncConfigurationController {
     return this.service.syncProductsNow(req.shopId);
   }
 
+  @Post("sync-offers-now")
+  syncOffersNow(@Req() req: AuthenticatedRequest) {
+    return this.service.syncOffersNow(req.shopId);
+  }
+
   @Get("selected-products")
   listSelectedProducts(@Req() req: AuthenticatedRequest) {
     return this.service.listSelectedProducts(req.shopId);

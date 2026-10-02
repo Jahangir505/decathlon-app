@@ -24,6 +24,9 @@ import {
 import { APP_ENV } from "../config/config.module";
 import { REPOSITORIES } from "../database/database.module";
 
+/** Variants per offer-sync job — keeps each job's id (a list of variant ids) and OF01 file small. */
+const OFFER_SYNC_BATCH_SIZE = 100;
+
 /**
  * Owns the producer side of every BullMQ queue — the piece that was entirely missing from the
  * Phase 2 scaffold (the worker had Workers registered with nothing ever adding a job). Creates a
@@ -208,6 +211,20 @@ export class QueueProducerService implements OnModuleInit, OnModuleDestroy {
     await this.clearFinishedJob(queue, jobId);
     const bullJob = await queue.add("sync", { ...payload, syncJobId: syncJob.id }, { ...DEFAULT_JOB_RETRY_OPTIONS, jobId });
     if (bullJob.id) await this.repositories.syncJobs.attachBullJobId(syncJob.id, bullJob.id);
+  }
+
+  /**
+   * Pushes price & stock for every variant already on Decathlon. A product import only creates the
+   * catalogue entry — without an offer Decathlon shows it with no price or quantity — so this is
+   * the merchant's way to (re)send offers for everything at once. Batched so each OF01 file and
+   * each job id stays a sensible size.
+   */
+  async enqueueOfferSyncAll(shopId: string): Promise<{ queued: number }> {
+    const variantIds = await this.repositories.productMappings.listLiveVariantIds(shopId);
+    for (let i = 0; i < variantIds.length; i += OFFER_SYNC_BATCH_SIZE) {
+      await this.enqueueOfferSync({ shopId, shopifyVariantIds: variantIds.slice(i, i + OFFER_SYNC_BATCH_SIZE) });
+    }
+    return { queued: variantIds.length };
   }
 
   /**

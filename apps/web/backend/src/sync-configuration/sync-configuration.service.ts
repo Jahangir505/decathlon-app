@@ -59,6 +59,10 @@ export class SyncConfigurationService {
     return this.queueProducer.enqueueProductSyncAll(shopId);
   }
 
+  syncOffersNow(shopId: string) {
+    return this.queueProducer.enqueueOfferSyncAll(shopId);
+  }
+
   /** The SELECTED-scope list, each with a rollup of its variants' Decathlon sync state. */
   async listSelectedProducts(shopId: string) {
     const selected = await this.repositories.selectedProducts.list(shopId);

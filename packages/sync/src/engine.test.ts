@@ -16,7 +16,7 @@ vi.mock("./adapters/decathlon.adapter", async (orig) => ({
   buildProductImportPayload: vi.fn(),
 }));
 
-import { SyncEngine, hashImportRow, type SyncEngineDeps } from "./engine";
+import { SyncEngine, hashImportRow, isLiveOnDecathlon, type SyncEngineDeps } from "./engine";
 import { matchProductMapping } from "./matching";
 import { buildProductImportPayload } from "./adapters/decathlon.adapter";
 
@@ -168,5 +168,49 @@ describe("syncProduct — automatic syncs skip what Decathlon already has", () =
   it("fingerprints ignore key order", () => {
     expect(hashImportRow({ a: 1, b: "x" })).toBe(hashImportRow({ b: "x", a: 1 }));
     expect(hashImportRow({ a: 1 })).not.toBe(hashImportRow({ a: 2 }));
+  });
+});
+
+describe("product import success -> offer sync", () => {
+  // Regression (live 2026-10-02): the success report that carries Decathlon's product id 404s on
+  // prod, so markSynced stored "" and every follow-up offer sync skipped — products went live on
+  // Decathlon with no price or quantity.
+  it("never marks a synced variant with an empty product id", async () => {
+    const markSynced = vi.fn();
+    const mapping = { shopifyVariantId: "gid://shopify/ProductVariant/1", sku: "TS-1", shopSku: "TS-1", decathlonProductId: null, decathlonOfferId: null };
+    const engine = new SyncEngine({
+      repositories: {
+        productMappings: { findByVariant: vi.fn(async () => mapping), markSynced, markFailed: vi.fn() },
+        syncLogs: { resolvePending: vi.fn() },
+        syncJobs: { finish: vi.fn() },
+      },
+      decathlon: {
+        getProductImportStatus: vi.fn(async () => ({
+          import_status: "COMPLETE",
+          transform_lines_in_error: 0,
+          transform_lines_in_success: 1,
+          integration_details: { products_successfully_synchronized: 1 },
+        })),
+        getProductImportSuccessReport: vi.fn(async () => {
+          throw new Error("404");
+        }),
+      },
+      shopify: {},
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as unknown as SyncEngineDeps);
+
+    const outcome = await engine.pollImportStatus({ shopId: "s1", importId: "1", kind: "product", shopifyVariantIds: [mapping.shopifyVariantId] });
+
+    expect(outcome).toMatchObject({ status: "TERMINAL", result: "SUCCESS" });
+    expect(markSynced).toHaveBeenCalledWith("s1", mapping.shopifyVariantId, "TS-1", undefined);
+  });
+
+  it.each([
+    [{ decathlonProductId: "TS-1", status: "SYNCED" }, true],
+    [{ decathlonProductId: "", status: "SYNCED" }, true],
+    [{ decathlonProductId: null, status: "PENDING" }, false],
+    [{ decathlonProductId: "", status: "FAILED" }, false],
+  ])("isLiveOnDecathlon(%o) is %s", (mapping, expected) => {
+    expect(isLiveOnDecathlon(mapping)).toBe(expected);
   });
 });

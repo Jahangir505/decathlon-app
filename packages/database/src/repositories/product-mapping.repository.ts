@@ -90,6 +90,21 @@ export class ProductMappingRepository {
     return this.prisma.productMapping.findMany({ where: { shopId, shopifyProductId: { in: shopifyProductIds } } });
   }
 
+  /** Variants whose product is on Decathlon — the ones an offer (price & stock) can be pushed for.
+   *  Same rule as the sync engine's isLiveOnDecathlon. */
+  listLiveVariantIds(shopId: string): Promise<string[]> {
+    return this.prisma.productMapping
+      .findMany({
+        where: {
+          shopId,
+          OR: [{ status: "SYNCED" }, { AND: [{ decathlonProductId: { not: null } }, { decathlonProductId: { not: "" } }] }],
+        },
+        select: { shopifyVariantId: true },
+        orderBy: { shopifyVariantId: "asc" },
+      })
+      .then((rows) => rows.map((r) => r.shopifyVariantId));
+  }
+
   countByStatus(shopId: string) {
     return this.prisma.productMapping.groupBy({
       by: ["status"],

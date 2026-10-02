@@ -132,6 +132,12 @@ function splitProblems(message: string): string[] {
   return at === -1 ? [message] : message.slice(at + marker.length).split("; ").map((p) => p.trim()).filter(Boolean);
 }
 
+/** Whether a variant's product is on Decathlon, so it can carry an offer (price & stock). SYNCED
+ *  covers mappings written before markSynced stopped storing an empty decathlonProductId. */
+export function isLiveOnDecathlon(mapping: { decathlonProductId: string | null; status: string } | null | undefined): boolean {
+  return Boolean(mapping?.decathlonProductId) || mapping?.status === "SYNCED";
+}
+
 /** Order-independent fingerprint of one P41 row — what "unchanged" means for a variant. */
 export function hashImportRow(row: Record<string, unknown>): string {
   const stable = Object.keys(row)
@@ -217,7 +223,7 @@ export class SyncEngine {
       });
       if (changed.length === 0) {
         const liveVariantIds = variants
-          .filter((v) => mappingByVariantId.get(v.shopifyVariantId!)?.decathlonProductId)
+          .filter((v) => isLiveOnDecathlon(mappingByVariantId.get(v.shopifyVariantId!)))
           .map((v) => v.shopifyVariantId!);
         await repositories.syncJobs.finish(syncJobId, "SKIPPED", "Nothing Decathlon uses changed since the last import");
         logger.info({ event: "product_sync_unchanged", shopId, productId: payload.shopifyProductId, liveVariants: liveVariantIds.length });
@@ -450,7 +456,7 @@ export class SyncEngine {
     const mappings = await Promise.all(
       payload.shopifyVariantIds.map((id) => repositories.productMappings.findByVariant(shopId, id)),
     );
-    const eligible = mappings.filter((m): m is NonNullable<typeof m> => Boolean(m?.decathlonProductId));
+    const eligible = mappings.filter((m): m is NonNullable<typeof m> => isLiveOnDecathlon(m));
 
     if (eligible.length === 0) {
       await repositories.syncJobs.finish(syncJobId, "SKIPPED", "No variant has been product-synced to Decathlon yet");
@@ -649,10 +655,15 @@ export class SyncEngine {
       }
       if (ok) {
         const decathlonId = row?.decathlonId;
+        // Never store an empty id: offer sync treats a mapping without one as "not on Decathlon
+        // yet". The success report that would carry Decathlon's id 404s on prod (seen live
+        // 2026-10-02 on every import), and storing "" silently skipped every price & stock push
+        // after it. A seller-created product is identified on Decathlon by its shop SKU anyway.
+        const productId = (payload.kind === "product" ? decathlonId : undefined) || mapping.decathlonProductId || mapping.shopSku;
         await repositories.productMappings.markSynced(
           shopId,
           shopifyVariantId,
-          payload.kind === "product" ? decathlonId ?? mapping.decathlonProductId ?? "" : mapping.decathlonProductId ?? "",
+          productId,
           payload.kind === "offer" ? decathlonId ?? mapping.decathlonOfferId ?? undefined : mapping.decathlonOfferId ?? undefined,
         );
       } else {

@@ -63,6 +63,8 @@ export function ConnectDecathlon() {
   const [syncProductsNowResult, setSyncProductsNowResult] = useState<
     { ok: true; queued: number; skippedNoCategory: number } | { ok: false; error: string } | null
   >(null);
+  const [syncingOffersNow, setSyncingOffersNow] = useState(false);
+  const [syncOffersNowResult, setSyncOffersNowResult] = useState<{ ok: true; queued: number } | { ok: false; error: string } | null>(null);
 
   useEffect(() => {
     apiGet<ConnectionStatus>("/api/connections/decathlon").then(setStatus).catch(() => undefined);
@@ -105,6 +107,19 @@ export function ConnectDecathlon() {
       setSyncProductsNowResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
     } finally {
       setSyncingProductsNow(false);
+    }
+  }
+
+  async function handleSyncOffersNow() {
+    setSyncingOffersNow(true);
+    setSyncOffersNowResult(null);
+    try {
+      const result = await apiPost<{ queued: number }>("/api/sync-configuration/sync-offers-now");
+      setSyncOffersNowResult({ ok: true, ...result });
+    } catch (err) {
+      setSyncOffersNowResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setSyncingOffersNow(false);
     }
   }
 
@@ -334,6 +349,9 @@ export function ConnectDecathlon() {
               <Button loading={syncingProductsNow} onClick={handleSyncProductsNow}>
                 Sync products now
               </Button>
+              <Button loading={syncingOffersNow} onClick={handleSyncOffersNow}>
+                Push price &amp; stock now
+              </Button>
               {savedSyncConfig ? <span className="text-sm text-emerald-600">Saved.</span> : null}
             </div>
 
@@ -357,6 +375,18 @@ export function ConnectDecathlon() {
                         : ".") +
                       " Only products that pass the Mappings page's readiness check are imported; the rest are skipped (see the Mappings page for why). Draft and archived products are never imported."
                     : `Failed to queue product sync: ${syncProductsNowResult.error}`}
+                </Banner>
+              </div>
+            ) : null}
+
+            {syncOffersNowResult ? (
+              <div className="mt-4">
+                <Banner tone={syncOffersNowResult.ok ? "success" : "critical"}>
+                  {syncOffersNowResult.ok
+                    ? syncOffersNowResult.queued > 0
+                      ? `Queued price & stock for ${syncOffersNowResult.queued} variant${syncOffersNowResult.queued === 1 ? "" : "s"} already on Decathlon — check Sync Logs shortly for the result.`
+                      : "No variants are on Decathlon yet — sync products first."
+                    : `Failed to queue price & stock sync: ${syncOffersNowResult.error}`}
                 </Banner>
               </div>
             ) : null}
