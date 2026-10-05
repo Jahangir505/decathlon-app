@@ -373,7 +373,13 @@ export function buildProductImportPayload(
             fromOptions === undefined && attr.variant && attr.valuesList && /size/i.test(attr.code)
               ? matchSizeInList(context.valueLists, attr.valuesList, optionValueFor(variant, context.sizeOptionNames), context.typeRule?.sizeChart)
               : undefined;
-          const typeDefault = attr.variant ? undefined : context.typeRule?.attributeDefaults?.[attr.code];
+          // A product type's value; for a per-variant colour/size list only when the variant has no
+          // such option at all (a wallet, an assorted multipack) — a value it has but that didn't
+          // match stays an error rather than being overwritten by the type's.
+          const typeDefault =
+            !attr.variant || (roleNames && !optionValueFor(variant, roleNames))
+              ? context.typeRule?.attributeDefaults?.[attr.code]
+              : undefined;
           if (fromOptions !== undefined) {
             row[attr.code] = fromOptions;
           } else if (fromSizeList !== undefined) {
@@ -391,10 +397,15 @@ export function buildProductImportPayload(
                 `${attr.label} (${attr.code}) — ` +
                   (size
                     ? `size "${size}" couldn't be matched: choose a Size chart for product type "${typeName ?? "(none)"}" on the Mappings page`
-                    : `the product has no "${context.sizeOptionNames?.[0] ?? "Size"}" option and Decathlon's list has no one-size value — set it on the product's "Decathlon Attributes" metafield`),
+                    : `the product has no "${context.sizeOptionNames?.[0] ?? "Size"}" option and Decathlon's list has no one-size value — choose it for product type "${typeName ?? "(none)"}" on the Mappings page, or set it on the product's "Decathlon Attributes" metafield`),
               );
             } else if (attr.code === "color") {
-              missing.push(`${attr.label} (${attr.code}) — ${where} (or add a "${context.colorOptionNames?.[0] ?? "Color"}" option to the product, and map its values on the Mappings page)`);
+              missing.push(
+                `${attr.label} (${attr.code}) — ` +
+                  (optionValueFor(variant, context.colorOptionNames) || !typeName
+                    ? `${where} (or add a "${context.colorOptionNames?.[0] ?? "Color"}" option to the product, and map its values on the Mappings page)`
+                    : `the product has no "${context.colorOptionNames?.[0] ?? "Color"}" option — choose it for product type "${typeName}" on the Mappings page, or ${where}`),
+              );
             } else if (!attr.variant && typeName) {
               missing.push(`${attr.label} (${attr.code}) — choose it for product type "${typeName}" on the Mappings page`);
             } else {

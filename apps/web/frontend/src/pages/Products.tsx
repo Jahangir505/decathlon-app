@@ -102,13 +102,39 @@ export function Products() {
   async function addProducts() {
     if (!window.shopify?.resourcePicker) return;
     setMessage(null);
+    // Only products that pass the Mappings readiness check can be picked. Shopify's picker can't
+    // filter on that itself, so it's handed the ready ids as a hidden search query.
+    setAdding(true);
+    let readyIds: string[];
+    try {
+      const selected = new Set(rows?.map((r) => r.shopifyProductId));
+      readyIds = (await apiGet<{ ids: string[] }>("/api/mappings/ready-products")).ids.filter((id) => !selected.has(id));
+    } catch (err) {
+      setMessage({ tone: "critical", text: `Couldn't check which products are ready: ${err instanceof Error ? err.message : String(err)}` });
+      setAdding(false);
+      return;
+    }
+    setAdding(false);
+    if (readyIds.length === 0) {
+      setMessage({
+        tone: "attention",
+        text: "No more products are ready to import. The Mappings page lists what each product is missing.",
+      });
+      return;
+    }
     const picked = await window.shopify.resourcePicker({
       type: "product",
       multiple: true,
       action: "add",
       // hidden: true — an Active product that isn't published to any sales channel (e.g. not on the
       // Online Store) is still a valid Decathlon listing; without it the picker leaves those out.
-      filter: { hidden: true, variants: false, draft: false, archived: false },
+      filter: {
+        hidden: true,
+        variants: false,
+        draft: false,
+        archived: false,
+        query: readyIds.map((id) => `id:${id.split("/").pop()}`).join(" OR "),
+      },
     });
     if (!picked || picked.length === 0) return;
     setAdding(true);
@@ -118,7 +144,7 @@ export function Products() {
         { products: picked.map((p) => ({ shopifyProductId: p.id, title: p.title })) },
       );
       const parts = [`Added ${result.added} product${result.added === 1 ? "" : "s"}.`];
-      if (result.queued > 0) parts.push(`${result.queued} queued — those ready for Decathlon are imported, the rest are skipped — the Mappings page shows why.`);
+      if (result.queued > 0) parts.push(`${result.queued} sent to Decathlon — check Sync Logs for the result.`);
       if (result.skippedNoCategory > 0)
         parts.push(`${result.skippedNoCategory} have no Decathlon category yet; set one on the Mappings page and they'll sync on their next edit or "Sync products now".`);
       setMessage({ tone: result.skippedNoCategory > 0 ? "attention" : "success", text: parts.join(" ") });
@@ -174,7 +200,8 @@ export function Products() {
             </div>
             {rows && rows.length === 0 ? (
               <EmptyState heading="No products selected">
-                Click <strong>Add products</strong> to choose what to list on Decathlon. They're sent as soon as you add them.
+                Click <strong>Add products</strong> to choose what to list on Decathlon. Only products ready to import can be picked, and
+                they're sent as soon as you add them.
               </EmptyState>
             ) : (
               <div className="overflow-x-auto">

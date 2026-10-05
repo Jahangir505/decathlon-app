@@ -107,6 +107,15 @@ export interface TypeAttributeNeed {
   valuesList: string | null;
   current: { code: string; label: string } | null;
   suggestion: { code: string; label: string } | null;
+  /** A per-variant colour/size list: the value here is used only for products with no Color/Size
+   *  option (a wallet, an assorted multipack) — the rest still read it from their own options. */
+  fallback: boolean;
+}
+
+/** Variant-level colour/size lists normally come from each variant's Shopify options; a product
+ *  without that option can still take the type's value instead. */
+function isOptionFallbackAttribute(a: DecathlonAttribute): boolean {
+  return a.variant && a.type === "LIST" && Boolean(a.valuesList) && (a.code === "color" || /size/i.test(a.code));
 }
 
 type StoredDefaults = Record<string, { code: string; label: string }>;
@@ -348,7 +357,11 @@ export class MappingsService {
    */
   private needsFor(attributes: DecathlonAttribute[], hierarchies: Awaited<ReturnType<CatalogCache["hierarchies"]>>, categoryCode: string) {
     return requiredAttributesForCategory(attributes, categoryCode, ancestorCodesFor(hierarchies, categoryCode)).filter(
-      (a) => !AUTOMATIC_ATTRIBUTE_CODES.has(a.code) && a.code !== GENDER_ATTRIBUTE_CODE && !a.variant && !isGeneratedText(a.code),
+      (a) =>
+        !AUTOMATIC_ATTRIBUTE_CODES.has(a.code) &&
+        a.code !== GENDER_ATTRIBUTE_CODE &&
+        (!a.variant || isOptionFallbackAttribute(a)) &&
+        !isGeneratedText(a.code),
     );
   }
 
@@ -408,15 +421,19 @@ export class MappingsService {
         .filter((r) => r.id !== rule.id)
         .map((r) => storedDefaults(r.attributeDefaults)[attr.code])
         .filter((v): v is { code: string; label: string } => Boolean(v));
+      const fallback = isOptionFallbackAttribute(attr);
       out.push({
         code: attr.code,
         label: attr.label,
         type: attr.type,
         valuesList: attr.valuesList ?? null,
         current: current[attr.code] ?? null,
-        suggestion: current[attr.code]
-          ? null
-          : this.suggestValue(attr, productType, rule.decathlonCategoryLabel, entries, elsewhere, rule.genderLabel),
+        // No guess for a fallback: a colour or size picked for one type says nothing about another.
+        suggestion:
+          current[attr.code] || fallback
+            ? null
+            : this.suggestValue(attr, productType, rule.decathlonCategoryLabel, entries, elsewhere, rule.genderLabel),
+        fallback,
       });
     }
     return out;
@@ -555,7 +572,7 @@ export class MappingsService {
 
     for (const rule of rules) {
       for (const need of await this.typeAttributes(shopId, rule.shopifyProductType)) {
-        if (need.current) continue;
+        if (need.current || need.fallback) continue;
         if (need.suggestion) {
           await this.saveTypeAttribute(shopId, rule.shopifyProductType, need.code, need.suggestion);
           filled += 1;
@@ -798,6 +815,21 @@ export class MappingsService {
    * accept or refuse, and why.
    */
   async readiness(shopId: string): Promise<{ ready: number; blocked: number; products: ProductReadiness[] }> {
+    const products = await this.checkProducts(shopId, 100);
+    return {
+      ready: products.filter((p) => p.status === "ready").length,
+      blocked: products.filter((p) => p.status === "blocked").length,
+      products,
+    };
+  }
+
+  /** Every active product that passes the readiness check — not capped like `readiness`, since the
+   *  Products page limits its picker to exactly these and a missing one couldn't be added at all. */
+  async readyProductIds(shopId: string): Promise<string[]> {
+    return (await this.checkProducts(shopId)).filter((p) => p.status === "ready").map((p) => p.shopifyProductId);
+  }
+
+  private async checkProducts(shopId: string, limit?: number): Promise<ProductReadiness[]> {
     const engine = new SyncEngine({
       repositories: this.repositories,
       decathlon: await this.decathlonFor(shopId),
@@ -805,18 +837,14 @@ export class MappingsService {
       logger,
     });
     const products: ProductReadiness[] = [];
-    for (const p of (await this.activeProducts(shopId)).slice(0, 100)) {
+    for (const p of (await this.activeProducts(shopId)).slice(0, limit)) {
       try {
         products.push(await engine.checkProduct(shopId, p.id));
       } catch (err) {
         products.push({ shopifyProductId: p.id, title: p.id, status: "blocked", variants: 0, problems: [`Couldn't check: ${String(err)}`] });
       }
     }
-    return {
-      ready: products.filter((p) => p.status === "ready").length,
-      blocked: products.filter((p) => p.status === "blocked").length,
-      products,
-    };
+    return products;
   }
 
   deleteCategoryMapping(shopId: string, productType: string) {

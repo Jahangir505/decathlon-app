@@ -7,7 +7,7 @@ declare global {
         type: "product";
         multiple?: boolean | number;
         action?: "add" | "select";
-        filter?: { hidden?: boolean; variants?: boolean; draft?: boolean; archived?: boolean };
+        filter?: { hidden?: boolean; variants?: boolean; draft?: boolean; archived?: boolean; query?: string };
       }) => Promise<Array<{ id: string; title: string }> | undefined>;
     };
   }

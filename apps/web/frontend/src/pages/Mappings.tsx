@@ -449,6 +449,8 @@ interface TypeAttributeNeed {
   valuesList: string | null;
   current: ValueOption | null;
   suggestion: ValueOption | null;
+  /** Used only for products with no Color/Size option; the rest read it from their options. */
+  fallback: boolean;
 }
 
 function AttributeValuePicker({
@@ -461,7 +463,8 @@ function AttributeValuePicker({
   onCancel: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [applyToAll, setApplyToAll] = useState(true);
+  // A fallback colour/size is specific to this type's products — never spread it to other types.
+  const [applyToAll, setApplyToAll] = useState(!need.fallback);
   const isList = need.type.startsWith("LIST") && need.valuesList;
   const { results, loading } = useRemoteSearch<ValueOption>(
     isList ? `/api/mappings/reference/values?listCode=${encodeURIComponent(need.valuesList!)}` : null,
@@ -495,7 +498,9 @@ function AttributeValuePicker({
         </div>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <Checkbox label="Also use for my other product types that need it" checked={applyToAll} onChange={setApplyToAll} />
+        {need.fallback ? null : (
+          <Checkbox label="Also use for my other product types that need it" checked={applyToAll} onChange={setApplyToAll} />
+        )}
         {!isList ? (
           <Button variant="primary" disabled={!query.trim()} onClick={() => onPick({ code: query.trim(), label: query.trim() }, applyToAll)}>
             Save
@@ -545,7 +550,10 @@ function TypeAttributes({ productType, refreshKey, onChange }: { productType: st
         {needs.map((n) => (
           <div key={n.code} className="py-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-sm text-slate-700">{n.label}</span>
+              <span className="text-sm text-slate-700">
+                {n.label}
+                {n.fallback ? <span className="block text-xs text-slate-500">Only for products with no {/size/i.test(n.code) ? "Size" : "Color"} option</span> : null}
+              </span>
               <div className="flex flex-wrap items-center gap-2">
                 {n.current ? (
                   <span className="text-sm text-slate-900">
@@ -558,6 +566,8 @@ function TypeAttributes({ productType, refreshKey, onChange }: { productType: st
                     </span>
                     <Button onClick={() => save(n.code, n.suggestion, true)}>Use</Button>
                   </>
+                ) : n.fallback ? (
+                  <span className="text-xs text-slate-500">Not set</span>
                 ) : (
                   <Badge tone="attention">Needed</Badge>
                 )}

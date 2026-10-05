@@ -149,6 +149,11 @@ export class MappingsController {
     return this.mappings.readiness(req.shopId);
   }
 
+  @Get("ready-products")
+  async readyProducts(@Req() req: AuthenticatedRequest) {
+    return { ids: await this.mappings.readyProductIds(req.shopId) };
+  }
+
   @Delete("kind/:kind")
   deleteKind(@Req() req: AuthenticatedRequest, @Param("kind") kind: string, @Query("shopifyValue") shopifyValue: string) {
     return this.mappings.deleteKindMapping(req.shopId, kindOf(kind), shopifyValue);

@@ -239,4 +239,27 @@ describe("one-size products", () => {
     const row = build(product(), variant({ Color: "Black" }), context({ attributes: attrs, valueLists: lists }));
     expect(row.SIZE_CPN_2).toBe("Z1_U");
   });
+
+  // Wallets' SIZE_CPN_97 list has no one-size value (readiness report, 2026-10-05); the type's value fills it.
+  const attrs = [...ATTRIBUTES, attr("SIZE_CPN_97", { type: "LIST", valuesList: "size_cpn_97", variant: true, hierarchyCode: "128500" })];
+  const lists = [...VALUES, { listCode: "size_cpn_97", code: "Z9_S", label: "S (Z9: WALLET)" }, { listCode: "size_cpn_97", code: "Z9_M", label: "M (Z9: WALLET)" }];
+  const typeRule = { productType: "Wallets", attributeDefaults: { SIZE_CPN_97: "Z9_M", color: "1" } };
+
+  it("without a one-size value, uses the product type's size and says where to set it", () => {
+    expect(() => build(product(), variant({ Color: "Black" }), context({ attributes: attrs, valueLists: lists, typeRule: { productType: "Wallets" } }))).toThrow(
+      /no "size" option.*choose it for product type "Wallets" on the Mappings page/,
+    );
+    expect(build(product(), variant({ Color: "Black" }), context({ attributes: attrs, valueLists: lists, typeRule })).SIZE_CPN_97).toBe("Z9_M");
+  });
+
+  it("uses the type's colour only for a product with no Color option", () => {
+    expect(build(product(), variant({}), context({ attributes: attrs, valueLists: lists, typeRule })).color).toBe("1");
+    expect(build(product(), variant({ Color: "Mauve" }), context({ attributes: attrs, valueLists: lists, typeRule })).color).toBe("17");
+  });
+
+  it("never lets the type's value cover a size the variant has but that didn't match", () => {
+    expect(() => build(product(), variant({ Color: "Black", Size: "XXS" }), context({ attributes: attrs, valueLists: lists, typeRule }))).toThrow(
+      /size "XXS" couldn't be matched/,
+    );
+  });
 });
