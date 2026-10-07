@@ -263,3 +263,22 @@ describe("one-size products", () => {
     );
   });
 });
+
+describe("variant grouping", () => {
+  const withParent = context({ attributes: [...ATTRIBUTES, attr("parentProductId", { required: false })] });
+
+  it("gives every variant of a product the same parentProductId (its numeric Shopify id)", () => {
+    const p = product({ shopifyProductId: "gid://shopify/Product/8123456789" });
+    const rows = buildProductImportPayload(
+      [{ product: p, variant: variant({ Color: "Black" }, "SKU-1") }, { product: p, variant: variant({ Color: "Mauve" }, "SKU-2") }],
+      withParent,
+    ).products;
+    expect(rows.map((r) => r.ProductIdentifier)).toEqual(["SKU-1", "SKU-2"]);
+    expect(rows.map((r) => r.parentProductId)).toEqual(["8123456789", "8123456789"]);
+  });
+
+  it("keeps a parentProductId set in the Decathlon Attributes metafield", () => {
+    const p = product({ shopifyProductId: "gid://shopify/Product/1", attributes: { parentProductId: "FAMILY-7" } });
+    expect(build(p, variant({ Color: "Black" }), withParent).parentProductId).toBe("FAMILY-7");
+  });
+});

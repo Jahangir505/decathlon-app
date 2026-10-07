@@ -158,6 +158,16 @@ export function matchSizeInList(
  *  isn't published to sellers (PM11 attaches it only to service categories), but Decathlon's own
  *  transformed file carries a SIZE column for apparel and footwear, so it is the field to fill. */
 export const SIZE_ATTRIBUTE_CODE = "SIZE";
+/** Decathlon attribute holding the Variant Group Code that groups variants into one product family. */
+export const PARENT_PRODUCT_ATTRIBUTE_CODE = "parentProductId";
+
+/** The Variant Group Code shared by every variant of a Shopify product: its numeric product id,
+ *  falling back to the first variant's SKU for a product normalized without one. */
+export function variantGroupCode(product: Pick<NormalizedProduct, "shopifyProductId" | "shopSku">): string | undefined {
+  const id = product.shopifyProductId?.split("/").pop();
+  return id || product.shopSku || undefined;
+}
+
 /** Attribute code under which explicit vendor -> brand decisions are stored (AttributeValueMapping). */
 export const BRAND_ATTRIBUTE_CODE = "brandName";
 
@@ -429,6 +439,16 @@ export function buildProductImportPayload(
       if (explicit || fromChart) row[SIZE_ATTRIBUTE_CODE] = explicit ?? fromChart;
       else if (chart) missing.push(`Size "${size}" isn't in size chart ${chart} — map it on the Mappings page or pick another chart`);
       else row[SIZE_ATTRIBUTE_CODE] = size;
+    }
+
+    // Variant grouping. Each row is its own Decathlon product (ProductIdentifier = variant SKU); what
+    // ties a Shopify product's variants into one family on Decathlon is a shared `parentProductId`
+    // (PM11: "this family will be identified with a VGC (Variant Group Code)"). It isn't required, so
+    // the loop above never filled it and every variant was listed as an unrelated product. The
+    // numeric Shopify product id stays stable when SKUs change or variants are added later.
+    const groupCode = variantGroupCode(product);
+    if (groupCode && (row[PARENT_PRODUCT_ATTRIBUTE_CODE] === undefined || row[PARENT_PRODUCT_ATTRIBUTE_CODE] === "")) {
+      if (context.attributes.some((a) => a.code === PARENT_PRODUCT_ATTRIBUTE_CODE)) row[PARENT_PRODUCT_ATTRIBUTE_CODE] = groupCode;
     }
 
     if (missing.length > 0) {

@@ -78,6 +78,7 @@ export function normalizeShopifyProduct(raw: ProductWithVariantsResponse, defaul
 
   return {
     externalId: undefined, // populated once ProductMapping.decathlonProductId is known
+    shopifyProductId: product.id,
     shopSku: variants[0]?.sku ?? product.id,
     title: product.title,
     status: product.status,

@@ -50,6 +50,8 @@ export interface NormalizedVariant {
 
 export interface NormalizedProduct {
   externalId?: string; // decathlonProductId once listed
+  /** Shopify product gid — every variant of it is grouped under one Decathlon variant family. */
+  shopifyProductId?: string;
   shopSku: string;
   title: string;
   /** Shopify product status — ACTIVE, DRAFT or ARCHIVED. Only ACTIVE is sent to Decathlon. */
