@@ -42,7 +42,10 @@ export interface NormalizedVariant {
   shopifyVariantId?: string;
   sku: string;
   ean?: string;
+  /** The price the customer pays — Shopify's variant `price`. */
   price: number;
+  /** The RRP — Shopify's "Compare-at price". Only set when it is above `price`, i.e. the variant is on sale. */
+  compareAtPrice?: number;
   currency: string;
   inventoryQuantity: number;
   optionValues?: Record<string, string>; // e.g. { Size: "M", Color: "Blue" }

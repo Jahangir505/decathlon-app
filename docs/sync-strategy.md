@@ -75,6 +75,13 @@ hard-coded, per requirement §11. `defaultCurrency` governs the currency field s
 no currency conversion is performed (out of scope unless Decathlon's actual offer schema requires a
 specific currency and the shop's Shopify currency differs — flag if discovered during Phase 5).
 
+RRP vs sale price: Shopify keeps the selling price in `price` and the RRP in `compareAtPrice`. A
+variant whose compare-at is above its price is on sale, so its offer goes out with `price` = the RRP
+and the discount price (`discount.price` on OF24, `discount-price` on OF01) = the Shopify price.
+Decathlon then shows the RRP struck through. A variant not on sale sends its Shopify price as `price`
+with no discount, and that also clears any earlier discount. The markup/discount % apply to both
+prices.
+
 ## 7. Order status mapping
 
 Decathlon's real order lifecycle observed so far (from the docs provided): orders only become visible

@@ -112,7 +112,13 @@ export interface ProductImportRequest {
  */
 export interface OfferImportRow {
   shop_sku: string;
+  /** The reference price — the RRP when the offer is discounted, struck through on Decathlon. */
   price: number;
+  /**
+   * The sale price the customer actually pays, when below `price`. Left out when there's no sale:
+   * an OF24 update replaces the whole offer, so that also ends a previously sent discount.
+   */
+  discount?: { price: number };
   quantity: number;
   /** OF24 only — OF01's CSV has no currency column (currency follows the sales channel). */
   currency_iso_code: string;

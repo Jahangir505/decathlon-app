@@ -32,6 +32,9 @@ function toOfferCsvRow(offer: OfferImportRow): Record<string, unknown> {
     sku: offer.shop_sku,
     price: offer.price,
     quantity: offer.quantity,
+    // Always written, even empty: a NORMAL-mode update resets the offer to the file's values, so an
+    // empty cell is what ends a sale that has since been removed in Shopify.
+    "discount-price": offer.discount?.price ?? "",
     state: offer.state_code,
     // Mirakl treats a row with no update-delete as an upsert, but saying so explicitly keeps the
     // file readable and leaves an obvious place to support deletion later.

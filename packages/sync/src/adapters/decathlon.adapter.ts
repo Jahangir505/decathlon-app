@@ -465,6 +465,12 @@ export function buildProductImportPayload(
 /**
  * NormalizedVariant -> Decathlon OF01/OF24 request. UNCONFIRMED shape — see types.ts. Applies the
  * shop's price markup/discount (docs/sync-strategy.md §6) and clamps stock to >= 0 (§8).
+ *
+ * Mirakl's offer `price` is the reference (RRP) price and `discount.price` is what the customer
+ * actually pays, shown against the struck-through `price`. So a Shopify variant on sale sends its
+ * Compare-at (RRP) as `price` and its Shopify price as the discount; one not on sale sends its
+ * Shopify price as `price` with no discount. Previously only the Shopify price was sent, so the
+ * RRP never reached Decathlon.
  */
 export function buildOfferImportPayload(
   rows: NormalizedVariant[],
@@ -475,9 +481,11 @@ export function buildOfferImportPayload(
     offerStateCode: string;
   },
 ): OfferImportRequest {
+  const toOfferPrice = (price: number) => computeOfferPrice(price, config.priceMarkupPercent, config.priceDiscountPercent);
   const offers: OfferImportRow[] = rows.map((variant) => ({
     shop_sku: variant.sku,
-    price: computeOfferPrice(variant.price, config.priceMarkupPercent, config.priceDiscountPercent),
+    price: toOfferPrice(variant.compareAtPrice ?? variant.price),
+    ...(variant.compareAtPrice !== undefined ? { discount: { price: toOfferPrice(variant.price) } } : {}),
     quantity: clampQuantity(variant.inventoryQuantity),
     currency_iso_code: config.defaultCurrency,
     // Mandatory — an offer with no state is rejected outright with "The state of the product is

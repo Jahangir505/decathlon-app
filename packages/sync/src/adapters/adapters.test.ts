@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeDecathlonOrder, parseReportText } from "./decathlon.adapter";
+import { buildOfferImportPayload, normalizeDecathlonOrder, parseReportText } from "./decathlon.adapter";
 import { buildShopifyOrderInput, normalizeShopifyProduct, parseFulfillmentWebhook, parseRefundWebhook } from "./shopify.adapter";
 import { decathlonOrder, orderLine } from "../test-fixtures";
 
@@ -196,6 +196,62 @@ describe("normalizeShopifyProduct product type", () => {
 
   it("leaves it unset when neither exists", () => {
     expect(normalizeShopifyProduct(raw("", null), "EUR").productType).toBeUndefined();
+  });
+});
+
+describe("sale price vs RRP", () => {
+  const product = (price: string, compareAtPrice: string | null) =>
+    ({
+      product: {
+        id: "gid://shopify/Product/1",
+        status: "ACTIVE",
+        title: "Tee",
+        images: { edges: [] },
+        variants: {
+          edges: [
+            {
+              node: {
+                id: "gid://shopify/ProductVariant/1",
+                sku: "SKU-1",
+                barcode: null,
+                price,
+                compareAtPrice,
+                selectedOptions: [],
+                inventoryItem: { id: "i", inventoryLevels: { edges: [] } },
+              },
+            },
+          ],
+        },
+      },
+    }) as unknown as Parameters<typeof normalizeShopifyProduct>[0];
+  const variant = (price: string, compareAtPrice: string | null) => normalizeShopifyProduct(product(price, compareAtPrice), "GBP").variants[0]!;
+  const offer = (price: string, compareAtPrice: string | null, markup: number | null = null) =>
+    buildOfferImportPayload([variant(price, compareAtPrice)], {
+      priceMarkupPercent: markup,
+      priceDiscountPercent: null,
+      defaultCurrency: "GBP",
+      offerStateCode: "11",
+    }).offers[0]!;
+
+  it("keeps the RRP only when it's above the selling price", () => {
+    expect(variant("30.00", "50.00").compareAtPrice).toBe(50);
+    expect(variant("30.00", "30.00").compareAtPrice).toBeUndefined();
+    expect(variant("30.00", "20.00").compareAtPrice).toBeUndefined();
+    expect(variant("30.00", null).compareAtPrice).toBeUndefined();
+  });
+
+  it("sends the RRP as the offer price and the Shopify price as the discount", () => {
+    expect(offer("30.00", "50.00")).toMatchObject({ price: 50, discount: { price: 30 } });
+  });
+
+  it("sends the Shopify price with no discount when not on sale", () => {
+    const o = offer("30.00", null);
+    expect(o.price).toBe(30);
+    expect(o.discount).toBeUndefined();
+  });
+
+  it("applies the shop's markup to both prices", () => {
+    expect(offer("30.00", "50.00", 10)).toMatchObject({ price: 55, discount: { price: 33 } });
   });
 });
 

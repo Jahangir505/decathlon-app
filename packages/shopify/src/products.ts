@@ -42,6 +42,7 @@ export const PRODUCT_WITH_VARIANTS_QUERY = /* GraphQL */ `
             sku
             barcode
             price
+            compareAtPrice
             selectedOptions {
               name
               value
@@ -87,6 +88,8 @@ export interface ShopifyVariantNode {
   sku: string | null;
   barcode: string | null;
   price: string;
+  /** Shopify's "Compare-at price" — the RRP the sale `price` is discounted from. Null when not on sale. */
+  compareAtPrice: string | null;
   selectedOptions: Array<{ name: string; value: string }>;
   inventoryItem: {
     id: string;

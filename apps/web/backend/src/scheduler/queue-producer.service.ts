@@ -1,5 +1,5 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { Queue, type RepeatOptions } from "bullmq";
+import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { decryptSecret, type AppEnv } from "@shopify-decathlon/shared";
 import type { Repositories } from "@shopify-decathlon/database";
@@ -275,13 +275,28 @@ export class QueueProducerService implements OnModuleInit, OnModuleDestroy {
     if (bullJob.id) await this.repositories.syncJobs.attachBullJobId(syncJob.id, bullJob.id);
   }
 
-  /** Adds/updates the per-shop recurring order-import poll. `repeat.key` (not the deprecated
-   *  `repeat.jobId`) is what gives the repeatable definition a stable identity BullMQ will actually
-   *  return from getRepeatableJobs() — without it, every interval change leaves the old repeatable
-   *  running forever alongside the new one instead of replacing it. */
-  async enqueueOrderImportRepeatable(shopId: string, everyMs: number): Promise<void> {
-    const repeat: RepeatOptions = { every: everyMs, key: `order-import:${shopId}` };
-    await this.getQueue(QUEUE_NAMES.ORDER_IMPORT).add("poll", { shopId }, { repeat });
+  /**
+   * Per-shop recurring order-import poll, as a BullMQ job scheduler. The id must not contain ":" —
+   * BullMQ names each run `repeat:<schedulerId>:<millis>` and rejects any custom job id that doesn't
+   * split into exactly 3 parts on ":". The previous version used `order-import:<shopId>`: BullMQ
+   * saved the schedule entry, then threw "Custom Id cannot contain :" creating the first job, so the
+   * schedule looked present but never ran — only manual "Sync now" ever imported orders (client
+   * report 2026-11-01: an order from 2026-10-28 still not imported).
+   */
+  orderImportSchedulerId(shopId: string): string {
+    return `order-import-${shopId}`;
+  }
+
+  async upsertOrderImportSchedule(shopId: string, everyMs: number): Promise<void> {
+    await this.getQueue(QUEUE_NAMES.ORDER_IMPORT).upsertJobScheduler(
+      this.orderImportSchedulerId(shopId),
+      { every: everyMs },
+      { name: "poll", data: { shopId } satisfies OrderImportJobPayload },
+    );
+  }
+
+  getOrderImportSchedule(shopId: string) {
+    return this.getQueue(QUEUE_NAMES.ORDER_IMPORT).getJobScheduler(this.orderImportSchedulerId(shopId));
   }
 
   /** One-off, manually-triggered order-import run ("Sync now" in the UI) — separate from the
@@ -297,15 +312,16 @@ export class QueueProducerService implements OnModuleInit, OnModuleDestroy {
     if (bullJob.id) await this.repositories.syncJobs.attachBullJobId(syncJob.id, bullJob.id);
   }
 
-  async removeOrderImportRepeatable(shopId: string): Promise<void> {
-    const queue = this.getQueue(QUEUE_NAMES.ORDER_IMPORT);
-    const repeatables = await queue.getRepeatableJobs();
-    for (const r of repeatables.filter((r) => r.key === `order-import:${shopId}`)) {
-      await queue.removeRepeatableByKey(r.key);
-    }
+  async removeOrderImportSchedule(shopId: string): Promise<void> {
+    await this.getQueue(QUEUE_NAMES.ORDER_IMPORT).removeJobScheduler(this.orderImportSchedulerId(shopId));
+    await this.removeLegacyOrderImportRepeatable(shopId);
   }
 
-  getOrderImportRepeatables() {
-    return this.getQueue(QUEUE_NAMES.ORDER_IMPORT).getRepeatableJobs();
+  /** Clears the broken `order-import:<shopId>` entry left in Redis by the old repeatable code. */
+  async removeLegacyOrderImportRepeatable(shopId: string): Promise<void> {
+    const queue = this.getQueue(QUEUE_NAMES.ORDER_IMPORT);
+    const legacyKey = `order-import:${shopId}`;
+    const repeatables = await queue.getRepeatableJobs();
+    if (repeatables.some((r) => r.key === legacyKey)) await queue.removeRepeatableByKey(legacyKey);
   }
 }

@@ -115,6 +115,26 @@ describe("endpoint contracts (confirmed live 2026-09-21)", () => {
   });
 });
 
+describe("OF01 importOffers CSV", () => {
+  it("writes the sale price as discount-price, and an empty one to end a sale", async () => {
+    responses.push(json(201, { import_id: 1 }));
+    const base = { quantity: 1, currency_iso_code: "GBP", state_code: "11" };
+    await client().importOffers({
+      offers: [
+        { ...base, shop_sku: "ON-SALE", price: 50, discount: { price: 30 } },
+        { ...base, shop_sku: "FULL-PRICE", price: 40 },
+      ],
+    });
+    const csv = await ((calls[0]!.body as FormData).get("file") as Blob).text();
+    const [header, ...rows] = csv.split("\r\n").map((line) => line.split(";"));
+    const col = (row: string[], name: string) => row[header!.indexOf(name)];
+    expect(col(rows[0]!, "price")).toBe("50");
+    expect(col(rows[0]!, "discount-price")).toBe("30");
+    expect(col(rows[1]!, "price")).toBe("40");
+    expect(col(rows[1]!, "discount-price")).toBe("");
+  });
+});
+
 describe("retry policy", () => {
   it("default reads retry a 503 and succeed", async () => {
     responses.push(json(503, {}), json(200, { carriers: [{ code: "X", label: "X" }] }));

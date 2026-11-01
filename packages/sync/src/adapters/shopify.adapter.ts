@@ -68,6 +68,7 @@ export function normalizeShopifyProduct(raw: ProductWithVariantsResponse, defaul
       sku: node.sku,
       ean: node.barcode ?? undefined,
       price: Number(node.price),
+      compareAtPrice: saleRrp(node.price, node.compareAtPrice),
       // ProductVariant has no currency field of its own (price is a plain decimal string) — the
       // shop's currency comes from the caller (SyncConfiguration.defaultCurrency), not Shopify.
       currency: defaultCurrency,
@@ -90,6 +91,16 @@ export function normalizeShopifyProduct(raw: ProductWithVariantsResponse, defaul
     variants,
     attributes,
   };
+}
+
+/**
+ * The RRP behind a sale price — Shopify's "Compare-at price", but only when it's actually above the
+ * selling price. Merchants often leave a stale compare-at equal to (or below) the price after a sale
+ * ends; Shopify itself shows no strike-through then, so neither should Decathlon.
+ */
+function saleRrp(price: string, compareAtPrice: string | null): number | undefined {
+  const rrp = Number(compareAtPrice);
+  return compareAtPrice && Number.isFinite(rrp) && rrp > Number(price) ? rrp : undefined;
 }
 
 /**
